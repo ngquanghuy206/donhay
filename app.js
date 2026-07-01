@@ -195,8 +195,9 @@ function fetchBack4AppModelsForBrand(brandName) {
         }
       });
       const json = await res.json();
+      if (json.error) throw new Error(json.error);
       const rows = json.results || [];
-      return rows
+      const items = rows
         .map((r) => {
           const model = (r.Model || "").replace(/^_+/, "").trim();
           if (!model) return null;
@@ -209,8 +210,9 @@ function fetchBack4AppModelsForBrand(brandName) {
           };
         })
         .filter(Boolean);
+      return { items, ok: true };
     } catch (err) {
-      return [];
+      return { items: [], ok: false, error: String((err && err.message) || err) };
     }
   })();
 
@@ -237,6 +239,7 @@ function fetchWikidataModelsForBrand(brandName) {
     const url = "https://query.wikidata.org/sparql?format=json&query=" + encodeURIComponent(sparql);
     try {
       const res = await fetch(url, { headers: { Accept: "application/sparql-results+json" } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
       const json = await res.json();
       const rows = (json.results && json.results.bindings) || [];
       const out = [];
@@ -254,9 +257,9 @@ function fetchWikidataModelsForBrand(brandName) {
           image: row.image ? row.image.value : null
         });
       });
-      return out;
+      return { items: out, ok: true };
     } catch (err) {
-      return [];
+      return { items: [], ok: false, error: String((err && err.message) || err) };
     }
   })();
 
@@ -265,22 +268,29 @@ function fetchWikidataModelsForBrand(brandName) {
 }
 
 // Bổ sung DEVICES từ cả 2 nguồn, so khớp tên đã chuẩn hoá để tránh trùng lặp.
-// Trả về true nếu có thêm máy mới.
+// Trả về { addedCount, ok } — ok=false nếu CẢ 2 nguồn đều lỗi (mất mạng, API die, ...),
+// để UI phân biệt được "gọi API xong nhưng không có máy mới" với "gọi API bị lỗi".
 async function augmentDevicesForPlatform(platform) {
-  const brandName = platform.baseOs === "android" ? platform.brand : platform.name;
-  if (!brandName) return false;
+  // QUAN TRỌNG: với iOS/HarmonyOS, tên hãng thật để tra API là "Apple"/"Huawei"
+  // (platform.vendor), KHÔNG PHẢI platform.name ("iOS"/"HarmonyOS") — 2 API này
+  // không hiểu tên hệ điều hành, chỉ hiểu tên hãng sản xuất.
+  const brandName = platform.baseOs === "android" ? platform.brand : platform.vendor;
+  if (!brandName) return { addedCount: 0, ok: false };
 
   const sameGroup = DEVICES.filter((dv) =>
     platform.baseOs === "android" ? dv.brand === brandName : dv.os === platform.baseOs
   );
   const existingNorm = sameGroup.map((dv) => normalizeName(dv.name));
   const targetOs = platform.baseOs === "android" ? "android" : platform.baseOs;
-  let added = false;
+  let addedCount = 0;
 
-  const [b4aResults, wdResults] = await Promise.all([
+  const [b4a, wd] = await Promise.all([
     fetchBack4AppModelsForBrand(brandName),
     fetchWikidataModelsForBrand(brandName)
   ]);
+  const b4aResults = b4a.items;
+  const wdResults = wd.items;
+  const ok = b4a.ok || wd.ok;
 
   b4aResults.forEach((r) => {
     if (!r.year || r.year < 2010) return;
@@ -306,7 +316,7 @@ async function augmentDevicesForPlatform(platform) {
       estimated: true
     });
     existingNorm.push(norm);
-    added = true;
+    addedCount++;
   });
 
   wdResults.forEach((r) => {
@@ -333,10 +343,10 @@ async function augmentDevicesForPlatform(platform) {
     });
     if (r.image) imageCache.set(id, Promise.resolve(r.image));
     existingNorm.push(norm);
-    added = true;
+    addedCount++;
   });
 
-  return added;
+  return { addedCount, ok };
 }
 
 const osGrid = document.getElementById("osGrid");
@@ -354,6 +364,7 @@ const activeOsLabel = document.getElementById("activeOsLabel");
 const changeOsBtn = document.getElementById("changeOsBtn");
 const quickSearchPanel = document.getElementById("quickSearchPanel");
 const osPanelTitle = document.getElementById("osPanelTitle");
+const syncStatus = document.getElementById("syncStatus");
 
 function renderAdmin() {
   document.getElementById("adminName").textContent = ADMIN_INFO.name;
@@ -413,15 +424,34 @@ function selectOs(platformId) {
   refreshFromWikidata(platform);
 }
 
-// Sau khi hiện danh sách máy có sẵn, âm thầm gọi Wikidata để bổ sung thêm các model
-// chưa có trong data.js. Khi có máy mới, render lại lưới (giữ nguyên từ khoá đang tìm).
+// Sau khi hiện danh sách máy có sẵn, gọi Back4App + Wikidata để bổ sung thêm các model
+// chưa có trong data.js. Có hiện trạng thái đang tải / kết quả / lỗi để người dùng biết
+// chắc API có chạy hay không, thay vì im lặng hoàn toàn như trước.
+function setSyncStatus(mode, text) {
+  syncStatus.classList.remove("hidden", "is-loading", "is-error", "is-done");
+  if (mode) syncStatus.classList.add(mode);
+  syncStatus.textContent = text;
+}
+
 function refreshFromWikidata(platform) {
-  augmentDevicesForPlatform(platform).then((added) => {
-    if (!added || state.os !== platform.id) return;
-    const q = searchInput.value.trim().toLowerCase();
-    const all = devicesForPlatform(platform);
-    const filtered = q ? all.filter((dv) => dv.name.toLowerCase().includes(q)) : all;
-    renderDeviceGrid(filtered);
+  setSyncStatus("is-loading", `Đang tải thêm dữ liệu máy ${platform.name}...`);
+
+  augmentDevicesForPlatform(platform).then(({ addedCount, ok }) => {
+    if (state.os !== platform.id) return;
+
+    if (!ok) {
+      setSyncStatus("is-error", "Không kết nối được nguồn dữ liệu bổ sung, đang dùng danh sách có sẵn.");
+      return;
+    }
+    if (addedCount > 0) {
+      setSyncStatus("is-done", `Đã bổ sung thêm ${addedCount} máy từ dữ liệu online.`);
+      const q = searchInput.value.trim().toLowerCase();
+      const all = devicesForPlatform(platform);
+      const filtered = q ? all.filter((dv) => dv.name.toLowerCase().includes(q)) : all;
+      renderDeviceGrid(filtered);
+    } else {
+      setSyncStatus("is-done", "Danh sách máy đã đầy đủ, không có thêm dữ liệu mới.");
+    }
   });
 }
 
