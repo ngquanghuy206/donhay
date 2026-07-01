@@ -51,7 +51,23 @@ const BRAND_DOMAIN = {
   Nokia: "nokia.com",
   Infinix: "infinixmobility.com",
   Tecno: "tecno-mobile.com",
-  itel: "itel-mobile.com"
+  itel: "itel-mobile.com",
+  // Bổ sung cho các hãng có thể tự phát hiện thêm qua API (Back4App)
+  BlackBerry: "blackberry.com",
+  Lenovo: "lenovo.com",
+  Panasonic: "panasonic.com",
+  HTC: "htc.com",
+  LG: "lg.com",
+  Meizu: "meizu.com",
+  ZTE: "ztedevices.com",
+  Sharp: "sharp-world.com",
+  TCL: "tcl.com",
+  Honor: "hihonor.com",
+  Alcatel: "alcatelmobile.com",
+  Lava: "lavamobiles.com",
+  Micromax: "micromaxinfo.com",
+  Huawei: "huawei.com",
+  "Sony Ericsson": "sonymobile.com"
 };
 
 function brandLogoIcon(brand) {
@@ -64,10 +80,19 @@ function brandLogoIcon(brand) {
 
 // Tách phần Android ra thành từng hãng riêng (Samsung 1 ô, OPPO 1 ô, ...),
 // giữ nguyên iOS và HarmonyOS làm 1 ô như cũ.
-function buildPlatformList() {
-  const androidBrands = [...new Set(DEVICES.filter((d) => d.os === "android").map((d) => d.brand))].sort((a, b) =>
-    a.localeCompare(b)
-  );
+// extraBrands: tên hãng lấy thêm được từ Back4App (ngoài các hãng đã gõ tay trong data.js).
+function buildPlatformList(extraBrands = []) {
+  const hardcodedBrands = [...new Set(DEVICES.filter((d) => d.os === "android").map((d) => d.brand))];
+  const existingNorm = new Set(hardcodedBrands.map(normalizeName));
+  // Apple/Huawei không được coi là hãng Android riêng — chúng đã có ô iOS/HarmonyOS.
+  const skip = new Set(["apple", "huawei"]);
+  const discoveredBrands = extraBrands.filter((b) => {
+    const n = normalizeName(b);
+    if (!n || skip.has(n) || existingNorm.has(n)) return false;
+    existingNorm.add(n);
+    return true;
+  });
+  const androidBrands = [...hardcodedBrands, ...discoveredBrands].sort((a, b) => a.localeCompare(b));
   const androidPlatforms = androidBrands.map((brand) => ({
     id: "android-" + brand.replace(/\s+/g, "_"),
     name: brand,
@@ -133,6 +158,54 @@ const BACK4APP_CONFIG = {
 
 function normalizeName(n) {
   return n.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// ---- Khám phá TOÀN BỘ danh sách hãng có trong Back4App ----
+// Back4App/Parse có cách "chuẩn" để lấy danh sách giá trị duy nhất của 1 cột là
+// /aggregate?distinct=Brand, NHƯNG cách đó bắt buộc phải dùng Master Key (key toàn quyền,
+// bỏ qua mọi luật bảo mật). Master Key TUYỆT ĐỐI không được đặt trong code chạy ở trình
+// duyệt người dùng — bất kỳ ai mở DevTools/Network tab cũng lấy được và có thể xoá/sửa/ghi
+// đè toàn bộ dataset của app. Vì vậy hàm dưới đây chỉ dùng REST API Key (key giới hạn quyền,
+// an toàn hơn khi lộ ra): gọi API nhiều lần, mỗi lần chỉ lấy cột "Brand" của 1000 dòng, phân
+// trang bằng skip, rồi tự gộp trùng (dedupe) ở phía JS để suy ra danh sách hãng đầy đủ.
+let brandDiscoveryPromise = null;
+function discoverAllBrandsFromBack4App() {
+  if (brandDiscoveryPromise) return brandDiscoveryPromise;
+
+  brandDiscoveryPromise = (async () => {
+    const seen = new Map(); // normalizeName -> tên hiển thị gốc (giữ đúng cách viết hoa đầu tiên gặp)
+    const pageSize = 1000;
+    const maxPages = 20; // chặn an toàn (~8.6k dòng / 1000 = ~9 trang), tránh vòng lặp vô hạn
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        const url =
+          `${BACK4APP_CONFIG.baseUrl}/classes/${BACK4APP_CONFIG.className}` +
+          `?limit=${pageSize}&skip=${page * pageSize}&keys=Brand`;
+        const res = await fetch(url, {
+          headers: {
+            "X-Parse-Application-Id": BACK4APP_CONFIG.appId,
+            "X-Parse-REST-API-Key": BACK4APP_CONFIG.restKey
+          }
+        });
+        const json = await res.json();
+        if (json.error) throw new Error(json.error);
+        const rows = json.results || [];
+        rows.forEach((r) => {
+          const brand = (r.Brand || "").trim();
+          if (!brand) return;
+          const key = normalizeName(brand);
+          if (key && !seen.has(key)) seen.set(key, brand);
+        });
+        if (rows.length < pageSize) break; // hết dữ liệu, dừng phân trang
+      }
+      return { brands: [...seen.values()], ok: true };
+    } catch (err) {
+      // Lỗi mạng/API: trả về những gì đã gom được (có thể rỗng) kèm cờ lỗi để UI báo đúng.
+      return { brands: [...seen.values()], ok: false, error: String((err && err.message) || err) };
+    }
+  })();
+
+  return brandDiscoveryPromise;
 }
 
 // Ước tính thông số hợp lý theo năm ra mắt, dựa theo xu hướng chung của thị trường
@@ -365,6 +438,7 @@ const changeOsBtn = document.getElementById("changeOsBtn");
 const quickSearchPanel = document.getElementById("quickSearchPanel");
 const osPanelTitle = document.getElementById("osPanelTitle");
 const syncStatus = document.getElementById("syncStatus");
+const brandDiscoveryStatus = document.getElementById("brandDiscoveryStatus");
 
 function renderAdmin() {
   document.getElementById("adminName").textContent = ADMIN_INFO.name;
@@ -428,9 +502,13 @@ function selectOs(platformId) {
 // chưa có trong data.js. Có hiện trạng thái đang tải / kết quả / lỗi để người dùng biết
 // chắc API có chạy hay không, thay vì im lặng hoàn toàn như trước.
 function setSyncStatus(mode, text) {
-  syncStatus.classList.remove("hidden", "is-loading", "is-error", "is-done");
-  if (mode) syncStatus.classList.add(mode);
-  syncStatus.textContent = text;
+  setStatusEl(syncStatus, mode, text);
+}
+
+function setStatusEl(el, mode, text) {
+  el.classList.remove("hidden", "is-loading", "is-error", "is-done");
+  if (mode) el.classList.add(mode);
+  el.textContent = text;
 }
 
 function refreshFromWikidata(platform) {
@@ -881,3 +959,29 @@ function runCounter(el, target, duration) {
 PLATFORM_LIST = buildPlatformList();
 renderAdmin();
 renderOsGrid();
+
+// Sau khi hiện lưới hãng/hệ điều hành mặc định, âm thầm quét toàn bộ Back4App để tìm thêm
+// những hãng mà data.js chưa có ô riêng (vd Sony Ericsson, BlackBerry, Lava...). Nếu có, tự
+// thêm ô mới vào lưới — không cần Master Key, chỉ đọc cột Brand qua REST Key như bình thường.
+setStatusEl(brandDiscoveryStatus, "is-loading", "Đang quét thêm hãng máy từ dữ liệu online...");
+discoverAllBrandsFromBack4App().then(({ brands, ok }) => {
+  const rebuilt = buildPlatformList(brands);
+  const addedBrandCount = rebuilt.length - PLATFORM_LIST.length;
+  PLATFORM_LIST = rebuilt;
+
+  if (!ok) {
+    setStatusEl(
+      brandDiscoveryStatus,
+      "is-error",
+      addedBrandCount > 0
+        ? `Quét chưa xong (mất mạng giữa chừng) nhưng vẫn tìm thêm được ${addedBrandCount} hãng.`
+        : "Không quét được thêm hãng mới, đang dùng danh sách có sẵn."
+    );
+  } else if (addedBrandCount > 0) {
+    setStatusEl(brandDiscoveryStatus, "is-done", `Đã tìm thêm ${addedBrandCount} hãng máy mới.`);
+  } else {
+    setStatusEl(brandDiscoveryStatus, "is-done", "Danh sách hãng đã đầy đủ, không có hãng mới.");
+  }
+
+  renderOsGrid();
+});
