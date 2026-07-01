@@ -168,6 +168,57 @@ function normalizeName(n) {
 // đè toàn bộ dataset của app. Vì vậy hàm dưới đây chỉ dùng REST API Key (key giới hạn quyền,
 // an toàn hơn khi lộ ra): gọi API nhiều lần, mỗi lần chỉ lấy cột "Brand" của 1000 dòng, phân
 // trang bằng skip, rồi tự gộp trùng (dedupe) ở phía JS để suy ra danh sách hãng đầy đủ.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Gọi 1 trang, có thử lại tối đa 2 lần nếu lỗi mạng/API tạm thời (vd bị giới hạn tốc độ request
+// trên gói free của Back4App). Ném lỗi thật (kèm status/nội dung) nếu vẫn thất bại sau khi thử lại.
+async function fetchBrandPageWithRetry(page, pageSize, attempt = 0) {
+  const url =
+    `${BACK4APP_CONFIG.baseUrl}/classes/${BACK4APP_CONFIG.className}` +
+    `?limit=${pageSize}&skip=${page * pageSize}&keys=Brand`;
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: {
+        "X-Parse-Application-Id": BACK4APP_CONFIG.appId,
+        "X-Parse-REST-API-Key": BACK4APP_CONFIG.restKey
+      }
+    });
+  } catch (networkErr) {
+    // fetch() tự nó throw khi mất mạng/bị chặn CORS (không có status code để đọc)
+    if (attempt < 2) {
+      await sleep(400 * (attempt + 1));
+      return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
+    }
+    throw new Error(`Lỗi mạng khi gọi trang ${page} (${networkErr && networkErr.message})`);
+  }
+
+  const raw = await res.text();
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    // Server trả về thứ không phải JSON (vd trang lỗi HTML của gateway/rate-limit)
+    if (attempt < 2) {
+      await sleep(400 * (attempt + 1));
+      return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
+    }
+    throw new Error(`HTTP ${res.status}, phản hồi không phải JSON: ${raw.slice(0, 120)}`);
+  }
+
+  if (!res.ok || json.error) {
+    // Parse Server trả lỗi có cấu trúc, vd { code, error: "..." } — thường do vượt giới hạn
+    // request/giây của gói free hoặc app tạm ngưng. Thử lại vài lần trước khi báo lỗi thật.
+    if (attempt < 2) {
+      await sleep(500 * (attempt + 1));
+      return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
+    }
+    throw new Error(`HTTP ${res.status}: ${json.error || "không rõ lỗi"}`);
+  }
+
+  return json.results || [];
+}
+
 let brandDiscoveryPromise = null;
 function discoverAllBrandsFromBack4App() {
   if (brandDiscoveryPromise) return brandDiscoveryPromise;
@@ -178,18 +229,7 @@ function discoverAllBrandsFromBack4App() {
     const maxPages = 20; // chặn an toàn (~8.6k dòng / 1000 = ~9 trang), tránh vòng lặp vô hạn
     try {
       for (let page = 0; page < maxPages; page++) {
-        const url =
-          `${BACK4APP_CONFIG.baseUrl}/classes/${BACK4APP_CONFIG.className}` +
-          `?limit=${pageSize}&skip=${page * pageSize}&keys=Brand`;
-        const res = await fetch(url, {
-          headers: {
-            "X-Parse-Application-Id": BACK4APP_CONFIG.appId,
-            "X-Parse-REST-API-Key": BACK4APP_CONFIG.restKey
-          }
-        });
-        const json = await res.json();
-        if (json.error) throw new Error(json.error);
-        const rows = json.results || [];
+        const rows = await fetchBrandPageWithRetry(page, pageSize);
         rows.forEach((r) => {
           const brand = (r.Brand || "").trim();
           if (!brand) return;
@@ -197,11 +237,14 @@ function discoverAllBrandsFromBack4App() {
           if (key && !seen.has(key)) seen.set(key, brand);
         });
         if (rows.length < pageSize) break; // hết dữ liệu, dừng phân trang
+        await sleep(150); // giãn nhịp request để tránh dính giới hạn tốc độ của gói free
       }
       return { brands: [...seen.values()], ok: true };
     } catch (err) {
       // Lỗi mạng/API: trả về những gì đã gom được (có thể rỗng) kèm cờ lỗi để UI báo đúng.
-      return { brands: [...seen.values()], ok: false, error: String((err && err.message) || err) };
+      const message = String((err && err.message) || err);
+      console.error("[discoverAllBrandsFromBack4App] failed:", message, err);
+      return { brands: [...seen.values()], ok: false, error: message };
     }
   })();
 
@@ -964,18 +1007,19 @@ renderOsGrid();
 // những hãng mà data.js chưa có ô riêng (vd Sony Ericsson, BlackBerry, Lava...). Nếu có, tự
 // thêm ô mới vào lưới — không cần Master Key, chỉ đọc cột Brand qua REST Key như bình thường.
 setStatusEl(brandDiscoveryStatus, "is-loading", "Đang quét thêm hãng máy từ dữ liệu online...");
-discoverAllBrandsFromBack4App().then(({ brands, ok }) => {
+discoverAllBrandsFromBack4App().then(({ brands, ok, error }) => {
   const rebuilt = buildPlatformList(brands);
   const addedBrandCount = rebuilt.length - PLATFORM_LIST.length;
   PLATFORM_LIST = rebuilt;
 
   if (!ok) {
+    const reason = error ? ` (${String(error).slice(0, 80)})` : "";
     setStatusEl(
       brandDiscoveryStatus,
       "is-error",
       addedBrandCount > 0
-        ? `Quét chưa xong (mất mạng giữa chừng) nhưng vẫn tìm thêm được ${addedBrandCount} hãng.`
-        : "Không quét được thêm hãng mới, đang dùng danh sách có sẵn."
+        ? `Quét chưa xong nhưng vẫn tìm thêm được ${addedBrandCount} hãng.${reason}`
+        : `Không quét được thêm hãng mới, đang dùng danh sách có sẵn.${reason}`
     );
   } else if (addedBrandCount > 0) {
     setStatusEl(brandDiscoveryStatus, "is-done", `Đã tìm thêm ${addedBrandCount} hãng máy mới.`);
