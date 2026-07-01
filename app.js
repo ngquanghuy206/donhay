@@ -175,12 +175,7 @@ function renderSuggestions(query) {
     const device = DEVICES.find((d) => d.id === el.dataset.id);
     const thumb = el.querySelector(".suggestion-thumb");
     fetchDeviceImage(device).then((src) => {
-      if (src) {
-        thumb.style.backgroundImage = `url(${src})`;
-        thumb.style.backgroundSize = "cover";
-        thumb.style.backgroundPosition = "center";
-        thumb.textContent = "";
-      }
+      if (src) applyPhoto(thumb, src);
     });
   });
 }
@@ -224,12 +219,7 @@ function renderQuickSuggestions(query) {
     const device = DEVICES.find((dv) => dv.id === el.dataset.id);
     const thumb = el.querySelector(".suggestion-thumb");
     fetchDeviceImage(device).then((src) => {
-      if (src) {
-        thumb.style.backgroundImage = `url(${src})`;
-        thumb.style.backgroundSize = "cover";
-        thumb.style.backgroundPosition = "center";
-        thumb.textContent = "";
-      }
+      if (src) applyPhoto(thumb, src);
     });
   });
 }
@@ -251,6 +241,16 @@ document.addEventListener("click", (e) => {
     quickSuggestions.classList.remove("is-open");
   }
 });
+
+// Áp ảnh thật vào 1 khung ảnh: hiện trọn vẹn ảnh (không bị cắt/zoom lạ), nền trắng cho dễ nhìn
+function applyPhoto(el, src) {
+  el.classList.add("thumb-photo", "photo-loaded");
+  el.style.backgroundImage = `url(${src})`;
+  el.style.backgroundSize = "contain";
+  el.style.backgroundRepeat = "no-repeat";
+  el.style.backgroundPosition = "center";
+  el.textContent = "";
+}
 
 function highlight(name, q) {
   const idx = name.toLowerCase().indexOf(q);
@@ -342,17 +342,13 @@ function showResult(device) {
 
   const photoBox = document.getElementById("resultPhoto");
   photoBox.classList.add("is-loading");
+  photoBox.classList.remove("thumb-photo", "photo-loaded");
   photoBox.style.backgroundImage = "none";
   photoBox.textContent = initialsOf(device.name);
   fetchDeviceImage(device).then((src) => {
     if (state.device !== device) return;
     photoBox.classList.remove("is-loading");
-    if (src) {
-      photoBox.style.backgroundImage = `url(${src})`;
-      photoBox.style.backgroundSize = "cover";
-      photoBox.style.backgroundPosition = "center";
-      photoBox.textContent = "";
-    }
+    if (src) applyPhoto(photoBox, src);
   });
 
   barsWrap.innerHTML = STAT_ROWS.map(

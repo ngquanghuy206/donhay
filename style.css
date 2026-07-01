@@ -333,6 +333,14 @@ section.panel {
   background: linear-gradient(135deg, var(--silver-1), var(--silver-3));
 }
 
+.suggestion-thumb.thumb-photo {
+  background-color: #fff;
+  background-blend-mode: normal;
+  padding: 3px;
+  background-origin: content-box;
+  background-clip: content-box;
+}
+
 .suggestion-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .suggestion-name { font-size: 14px; font-weight: 500; }
 .suggestion-name mark { background: none; color: var(--white); text-decoration: underline; }
@@ -377,6 +385,13 @@ section.panel {
   color: var(--black-0);
   background: linear-gradient(135deg, var(--silver-1), var(--silver-3));
   border: 1px solid var(--line);
+}
+
+.result-photo.photo-loaded {
+  background-color: #fff;
+  padding: 6px;
+  background-origin: content-box;
+  background-clip: content-box;
 }
 
 .result-photo.is-loading {
