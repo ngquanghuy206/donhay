@@ -13,12 +13,12 @@ function computeSensitivity(device) {
   const tierNorm = norm(device.tier, 1, 5);
   const ramNorm = norm(device.ram, 4, 16);
 
-  const base = 88 + tierNorm * 32 + refreshNorm * 26 + ppiNorm * 14 + screenNorm * 18;
+  const base = 100 + tierNorm * 40 + refreshNorm * 30 + ppiNorm * 16 + screenNorm * 22;
 
   const lookAround = Math.round(clamp(base, 60, 200));
-  const hongTam = Math.round(clamp(base + 6 + tierNorm * 12, 60, 200));
-  const scope2x = Math.round(clamp(base + 22 + refreshNorm * 18 - screenNorm * 6, 60, 200));
-  const scope4x = Math.round(clamp(base + 10 + refreshNorm * 12, 60, 200));
+  const hongTam = Math.round(clamp(base + 8 + tierNorm * 14, 60, 200));
+  const scope2x = Math.round(clamp(base + 26 + refreshNorm * 20 - screenNorm * 6, 60, 200));
+  const scope4x = Math.round(clamp(base + 14 + refreshNorm * 14, 60, 200));
   const sungNgam = Math.round(clamp(66 + tierNorm * 28 + screenNorm * 14, 50, 150));
   const cameraTuDo = Math.round(clamp(62 + tierNorm * 24 + ramNorm * 8, 50, 150));
 
@@ -34,10 +34,61 @@ function computeSensitivity(device) {
 
 const state = { os: null, device: null };
 
+// Tách phần Android ra thành từng hãng riêng (Samsung 1 ô, OPPO 1 ô, ...),
+// giữ nguyên iOS và HarmonyOS làm 1 ô như cũ.
+function buildPlatformList() {
+  const androidBrands = [...new Set(DEVICES.filter((d) => d.os === "android").map((d) => d.brand))].sort((a, b) =>
+    a.localeCompare(b)
+  );
+  const androidPlatforms = androidBrands.map((brand) => ({
+    id: "android-" + brand.replace(/\s+/g, "_"),
+    name: brand,
+    vendor: "Android",
+    baseOs: "android",
+    brand,
+    initials: initialsOf(brand)
+  }));
+  const iosPlatform = OS_LIST.find((o) => o.id === "ios");
+  const harmonyPlatform = OS_LIST.find((o) => o.id === "harmony");
+  return [
+    { ...iosPlatform, baseOs: "ios" },
+    ...androidPlatforms,
+    { ...harmonyPlatform, baseOs: "harmony" }
+  ];
+}
+
+let PLATFORM_LIST = [];
+
+function getPlatform(id) {
+  return PLATFORM_LIST.find((p) => p.id === id);
+}
+
+function devicesForPlatform(platform) {
+  if (!platform) return [];
+  if (platform.baseOs === "android") {
+    return DEVICES.filter((dv) => dv.os === "android" && dv.brand === platform.brand);
+  }
+  return DEVICES.filter((dv) => dv.os === platform.baseOs);
+}
+
+function osDisplayName(baseOs) {
+  if (baseOs === "ios") return "iOS";
+  if (baseOs === "harmony") return "HarmonyOS";
+  return "Android";
+}
+
+// Tìm platform (ô hãng/hệ điều hành) tương ứng với 1 thiết bị bất kỳ
+function findPlatformForDevice(device) {
+  if (device.os === "android") {
+    return PLATFORM_LIST.find((p) => p.baseOs === "android" && p.brand === device.brand);
+  }
+  return PLATFORM_LIST.find((p) => p.baseOs === device.os);
+}
+
 const osGrid = document.getElementById("osGrid");
 const searchSection = document.getElementById("searchSection");
 const searchInput = document.getElementById("searchInput");
-const suggestions = document.getElementById("suggestions");
+const deviceGrid = document.getElementById("deviceGrid");
 const quickSearchInput = document.getElementById("quickSearchInput");
 const quickSuggestions = document.getElementById("quickSuggestions");
 const resultSection = document.getElementById("resultSection");
@@ -77,12 +128,12 @@ function renderAdmin() {
 }
 
 function renderOsGrid() {
-  osGrid.innerHTML = OS_LIST.map(
-    (os) => `
-      <button class="os-card" data-os="${os.id}">
-        <span class="os-badge">${os.icon}</span>
-        <span class="os-name">${os.name}</span>
-        <span class="os-vendor">${os.vendor}</span>
+  osGrid.innerHTML = PLATFORM_LIST.map(
+    (p) => `
+      <button class="os-card" data-os="${p.id}">
+        <span class="os-badge">${p.icon ? p.icon : `<span class="os-badge-text">${p.initials}</span>`}</span>
+        <span class="os-name">${p.name}</span>
+        <span class="os-vendor">${p.vendor}</span>
       </button>`
   ).join("");
 
@@ -91,41 +142,42 @@ function renderOsGrid() {
   });
 }
 
-function selectOs(osId) {
-  state.os = osId;
+function selectOs(platformId) {
+  state.os = platformId;
   state.device = null;
-  const os = OS_LIST.find((o) => o.id === osId);
-  activeOsLabel.textContent = os.name;
+  const platform = getPlatform(platformId);
+  activeOsLabel.textContent = platform.name;
   osGrid.parentElement.classList.add("is-collapsed");
   quickSearchPanel.classList.add("hidden");
   osPanelTitle.textContent = "Chọn hệ điều hành";
   searchSection.classList.remove("hidden");
   resultSection.classList.add("hidden");
   searchInput.value = "";
-  searchInput.placeholder = `Tìm dòng máy ${os.name}, ví dụ: ${sampleDeviceFor(osId)}`;
-  suggestions.innerHTML = "";
+  searchInput.placeholder = `Tìm dòng máy ${platform.name}, ví dụ: ${sampleDeviceFor(platform)}`;
+  renderDeviceGrid(devicesForPlatform(platform));
   searchInput.focus();
 }
 
 function pickDevice(device) {
-  state.os = device.os;
-  const os = OS_LIST.find((o) => o.id === device.os);
-  activeOsLabel.textContent = os.name;
+  const platform = findPlatformForDevice(device);
+  state.os = platform.id;
+  state.device = device;
+  activeOsLabel.textContent = platform.name;
   osGrid.parentElement.classList.add("is-collapsed");
   quickSearchPanel.classList.add("hidden");
   osPanelTitle.textContent = "Chọn hệ điều hành";
   searchSection.classList.remove("hidden");
-  searchInput.value = device.name;
-  searchInput.placeholder = `Tìm dòng máy ${os.name}, ví dụ: ${sampleDeviceFor(device.os)}`;
-  suggestions.innerHTML = "";
+  searchInput.value = "";
+  searchInput.placeholder = `Tìm dòng máy ${platform.name}, ví dụ: ${sampleDeviceFor(platform)}`;
+  renderDeviceGrid(devicesForPlatform(platform));
   quickSearchInput.value = "";
   quickSuggestions.classList.remove("is-open");
   showResult(device);
 }
 
-function sampleDeviceFor(osId) {
-  const d = DEVICES.find((d) => d.os === osId);
-  return d ? d.name : "";
+function sampleDeviceFor(platform) {
+  const list = devicesForPlatform(platform);
+  return list.length ? list[0].name : "";
 }
 
 changeOsBtn.addEventListener("click", () => {
@@ -136,47 +188,38 @@ changeOsBtn.addEventListener("click", () => {
   resultSection.classList.add("hidden");
 });
 
-function renderSuggestions(query) {
-  if (!state.os || query.trim().length === 0) {
-    suggestions.innerHTML = "";
-    suggestions.classList.remove("is-open");
-    return;
-  }
-  const q = query.trim().toLowerCase();
-  const matches = DEVICES.filter((d) => d.os === state.os && d.name.toLowerCase().includes(q)).slice(0, 8);
-
-  if (matches.length === 0) {
-    suggestions.innerHTML = `<div class="suggestion-empty">Không tìm thấy dòng máy phù hợp</div>`;
-    suggestions.classList.add("is-open");
+// Danh sách máy dạng lưới thẻ 2 cột: hiện ảnh máy, thông tin máy và nút "Xem độ nhạy"
+function renderDeviceGrid(list) {
+  if (!list || list.length === 0) {
+    deviceGrid.innerHTML = `<div class="suggestion-empty">Không tìm thấy dòng máy phù hợp</div>`;
     return;
   }
 
-  suggestions.innerHTML = matches
+  deviceGrid.innerHTML = list
     .map(
-      (d) => `
-      <button class="suggestion-item" data-id="${d.id}">
-        <span class="suggestion-thumb">${initialsOf(d.name)}</span>
-        <span class="suggestion-text">
-          <span class="suggestion-name">${highlight(d.name, q)}</span>
-          <span class="suggestion-sub">${d.brand} · ${d.year}</span>
-        </span>
-      </button>`
+      (dv) => `
+      <div class="device-card" data-id="${dv.id}">
+        <div class="device-card-photo" data-photo>${initialsOf(dv.name)}</div>
+        <div class="device-card-body">
+          <div class="device-card-name">${dv.name}</div>
+          <div class="device-card-meta">${dv.screen}" · ${dv.ppi} PPI · ${dv.refresh}Hz · ${dv.ram}GB · ${dv.year}</div>
+        </div>
+        <button class="device-card-btn" data-view type="button">Xem độ nhạy</button>
+      </div>`
     )
     .join("");
-  suggestions.classList.add("is-open");
 
-  suggestions.querySelectorAll(".suggestion-item").forEach((el) => {
-    el.addEventListener("click", () => {
-      const device = DEVICES.find((d) => d.id === el.dataset.id);
-      suggestions.classList.remove("is-open");
+  deviceGrid.querySelectorAll(".device-card").forEach((card) => {
+    const device = DEVICES.find((dv) => dv.id === card.dataset.id);
+    const photoEl = card.querySelector("[data-photo]");
+    fetchDeviceImage(device).then((src) => {
+      if (src) applyPhoto(photoEl, src);
+    });
+    card.querySelector("[data-view]").addEventListener("click", (e) => {
+      e.stopPropagation();
       pickDevice(device);
     });
-
-    const device = DEVICES.find((d) => d.id === el.dataset.id);
-    const thumb = el.querySelector(".suggestion-thumb");
-    fetchDeviceImage(device).then((src) => {
-      if (src) applyPhoto(thumb, src);
-    });
+    card.addEventListener("click", () => pickDevice(device));
   });
 }
 
@@ -202,7 +245,7 @@ function renderQuickSuggestions(query) {
         <span class="suggestion-thumb">${initialsOf(dv.name)}</span>
         <span class="suggestion-text">
           <span class="suggestion-name">${highlight(dv.name, q)}</span>
-          <span class="suggestion-sub">${dv.brand} · ${OS_LIST.find((o) => o.id === dv.os).name} · ${dv.year}</span>
+          <span class="suggestion-sub">${dv.brand} · ${osDisplayName(dv.os)} · ${dv.year}</span>
         </span>
       </button>`
     )
@@ -237,7 +280,6 @@ quickSearchInput.addEventListener("focus", () => {
 
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".search-wrap")) {
-    suggestions.classList.remove("is-open");
     quickSuggestions.classList.remove("is-open");
   }
 });
@@ -317,11 +359,14 @@ let debounceTimer = null;
 searchInput.addEventListener("input", (e) => {
   clearTimeout(debounceTimer);
   const v = e.target.value;
-  debounceTimer = setTimeout(() => renderSuggestions(v), 120);
-});
-
-searchInput.addEventListener("focus", () => {
-  if (searchInput.value.trim().length > 0) renderSuggestions(searchInput.value);
+  debounceTimer = setTimeout(() => {
+    const platform = getPlatform(state.os);
+    if (!platform) return;
+    const q = v.trim().toLowerCase();
+    const all = devicesForPlatform(platform);
+    const filtered = q ? all.filter((dv) => dv.name.toLowerCase().includes(q)) : all;
+    renderDeviceGrid(filtered);
+  }, 120);
 });
 
 const STAT_ROWS = [
@@ -414,5 +459,6 @@ function runCounter(el, target, duration) {
   requestAnimationFrame(tick);
 }
 
+PLATFORM_LIST = buildPlatformList();
 renderAdmin();
 renderOsGrid();
