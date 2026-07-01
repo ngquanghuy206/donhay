@@ -113,6 +113,121 @@ function findPlatformForDevice(device) {
   return PLATFORM_LIST.find((p) => p.baseOs === device.os);
 }
 
+// ============ Tự động bổ sung TÊN MÁY mới theo hãng qua Wikidata SPARQL ============
+// Mục đích: data.js chỉ chứa danh sách gõ tay (hữu hạn). Lớp này gọi API Wikidata Query Service
+// (miễn phí, không cần key, hỗ trợ CORS) để lấy thêm các model điện thoại của cùng hãng mà
+// data.js chưa có, rồi UỚC TÍNH thông số (màn hình/PPI/tần số quét/RAM/tier) theo năm ra mắt.
+// Các máy này được đánh dấu estimated:true để người dùng biết đây là số ước tính, không phải
+// số đo thực tế như các máy đã được nhập tay.
+const wikidataBrandCache = new Map();
+
+function normalizeName(n) {
+  return n.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Ước tính thông số hợp lý theo năm ra mắt, dựa theo xu hướng chung của thị trường
+// (không chính xác 100% nhưng đủ dùng để tính độ nhạy tương đối).
+function estimateSpecsForYear(year) {
+  const y = clamp(year || 2022, 2014, 2027);
+  const screen = Math.round((5.5 + (y - 2014) * 0.09) * 100) / 100;
+  const ppi = Math.round(clamp(380 + (y - 2014) * 6, 380, 500));
+  const refresh = y >= 2022 ? 120 : y >= 2019 ? 90 : 60;
+  const ram = Math.round(clamp(3 + (y - 2014) * 0.75, 3, 16));
+  const tier = Math.round(clamp(2 + (y - 2016) * 0.28, 1, 5));
+  return { screen: clamp(screen, 4.7, 7.6), ppi, refresh, ram, tier };
+}
+
+// Gọi Wikidata Query Service: tìm mọi entity là "smartphone model" có hãng sản xuất (P176)
+// trùng tên hãng đang xét. Có cache theo Promise để 1 hãng chỉ gọi API đúng 1 lần / phiên.
+function fetchWikidataModelsForBrand(brandName) {
+  if (wikidataBrandCache.has(brandName)) return wikidataBrandCache.get(brandName);
+
+  const promise = (async () => {
+    const safeBrand = brandName.replace(/["\\]/g, "");
+    const sparql = `
+      SELECT DISTINCT ?item ?itemLabel ?image ?pubdate WHERE {
+        ?item wdt:P31 wd:Q19723451 .
+        ?item wdt:P176 ?manufacturer .
+        ?manufacturer rdfs:label ?mlabel .
+        FILTER(LANG(?mlabel) = "en" && LCASE(STR(?mlabel)) = LCASE("${safeBrand}"))
+        OPTIONAL { ?item wdt:P18 ?image. }
+        OPTIONAL { ?item wdt:P577 ?pubdate. }
+        SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+      } LIMIT 80`;
+    const url = "https://query.wikidata.org/sparql?format=json&query=" + encodeURIComponent(sparql);
+    try {
+      const res = await fetch(url, { headers: { Accept: "application/sparql-results+json" } });
+      const json = await res.json();
+      const rows = (json.results && json.results.bindings) || [];
+      const out = [];
+      const seen = new Set();
+      rows.forEach((row) => {
+        const label = row.itemLabel && row.itemLabel.value;
+        if (!label) return;
+        const key = label.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({
+          qid: row.item.value.split("/").pop(),
+          name: label,
+          year: row.pubdate ? new Date(row.pubdate.value).getFullYear() : null,
+          image: row.image ? row.image.value : null
+        });
+      });
+      return out;
+    } catch (err) {
+      return [];
+    }
+  })();
+
+  wikidataBrandCache.set(brandName, promise);
+  return promise;
+}
+
+// Bổ sung DEVICES với các máy lấy được từ Wikidata mà data.js chưa có (so khớp tên đã chuẩn hoá,
+// bỏ qua nếu tên gần giống 1 máy đã tồn tại để tránh trùng lặp). Trả về true nếu có thêm máy mới.
+async function augmentDevicesForPlatform(platform) {
+  const brandName = platform.baseOs === "android" ? platform.brand : platform.name;
+  if (!brandName) return false;
+
+  const sameGroup = DEVICES.filter((dv) =>
+    platform.baseOs === "android" ? dv.brand === brandName : dv.os === platform.baseOs
+  );
+  const existingNorm = sameGroup.map((dv) => normalizeName(dv.name));
+
+  const results = await fetchWikidataModelsForBrand(brandName);
+  let added = false;
+
+  results.forEach((r) => {
+    if (!r.year || r.year < 2014) return;
+    const norm = normalizeName(r.name);
+    const isDup = existingNorm.some((ex) => ex === norm || ex.includes(norm) || norm.includes(ex));
+    if (isDup) return;
+    const id = "wd-" + r.qid;
+    if (DEVICES.some((dv) => dv.id === id)) return;
+
+    const specs = estimateSpecsForYear(r.year);
+    DEVICES.push({
+      id,
+      name: r.name,
+      brand: brandName,
+      os: platform.baseOs === "android" ? "android" : platform.baseOs,
+      screen: specs.screen,
+      ppi: specs.ppi,
+      refresh: specs.refresh,
+      ram: specs.ram,
+      tier: specs.tier,
+      year: r.year,
+      estimated: true
+    });
+    if (r.image) imageCache.set(id, Promise.resolve(r.image));
+    existingNorm.push(norm);
+    added = true;
+  });
+
+  return added;
+}
+
 const osGrid = document.getElementById("osGrid");
 const searchSection = document.getElementById("searchSection");
 const searchInput = document.getElementById("searchInput");
@@ -184,6 +299,19 @@ function selectOs(platformId) {
   searchInput.placeholder = `Tìm dòng máy ${platform.name}, ví dụ: ${sampleDeviceFor(platform)}`;
   renderDeviceGrid(devicesForPlatform(platform));
   searchInput.focus();
+  refreshFromWikidata(platform);
+}
+
+// Sau khi hiện danh sách máy có sẵn, âm thầm gọi Wikidata để bổ sung thêm các model
+// chưa có trong data.js. Khi có máy mới, render lại lưới (giữ nguyên từ khoá đang tìm).
+function refreshFromWikidata(platform) {
+  augmentDevicesForPlatform(platform).then((added) => {
+    if (!added || state.os !== platform.id) return;
+    const q = searchInput.value.trim().toLowerCase();
+    const all = devicesForPlatform(platform);
+    const filtered = q ? all.filter((dv) => dv.name.toLowerCase().includes(q)) : all;
+    renderDeviceGrid(filtered);
+  });
 }
 
 function pickDevice(device) {
@@ -201,6 +329,7 @@ function pickDevice(device) {
   quickSearchInput.value = "";
   quickSuggestions.classList.remove("is-open");
   showResult(device);
+  refreshFromWikidata(platform);
 }
 
 function sampleDeviceFor(platform) {
@@ -229,7 +358,7 @@ function renderDeviceGrid(list) {
       <div class="device-card" data-id="${dv.id}">
         <div class="device-card-photo" data-photo>${initialsOf(dv.name)}</div>
         <div class="device-card-body">
-          <div class="device-card-name">${dv.name}</div>
+          <div class="device-card-name">${dv.name}${dv.estimated ? ' <span class="est-badge" title="Thông số ước tính tự động, chưa kiểm chứng thủ công">ước tính</span>' : ""}</div>
           <div class="device-card-meta">${dv.screen}" · ${dv.ppi} PPI · ${dv.refresh}Hz · ${dv.ram}GB · ${dv.year}</div>
         </div>
         <button class="device-card-btn" data-view type="button">Xem độ nhạy</button>
@@ -445,6 +574,31 @@ async function wikidataThumbFor(query, device) {
   }
 }
 
+// Tìm ảnh trực tiếp trên Wikimedia Commons (kho ảnh chung, KHÔNG cần bài Wikipedia hay claim
+// P18 trên Wikidata). Nhiều máy mới (vd Pixel 9, Pixel 9 Pro) chưa có ảnh gắn vào trang
+// Wikipedia/Wikidata nhưng Commons vẫn có ảnh nếu tìm đúng theo tên file/category.
+async function commonsSearchThumbFor(query, device) {
+  try {
+    const searchUrl =
+      "https://commons.wikimedia.org/w/api.php?origin=*&action=query&list=search&format=json&srnamespace=6&srlimit=5&srsearch=" +
+      encodeURIComponent(query);
+    const res = await fetch(searchUrl);
+    const json = await res.json();
+    const hits = (json.query && json.query.search) || [];
+    for (const hit of hits) {
+      const fileName = (hit.title || "").replace(/^File:/, "");
+      if (!fileName) continue;
+      if (!isRelevantTitle(fileName, device)) continue;
+      // Bỏ qua file không phải ảnh (vd .pdf, .svg biểu đồ...)
+      if (!/\.(jpe?g|png|webp)$/i.test(fileName)) continue;
+      return "https://commons.wikimedia.org/wiki/Special:FilePath/" + encodeURIComponent(fileName) + "?width=600";
+    }
+    return null;
+  } catch (err) {
+    return null;
+  }
+}
+
 // Cache theo Promise (không chỉ theo giá trị) để khung ảnh trong lưới và khung ảnh ở trang kết quả
 // dùng chung đúng 1 lần tải — bấm vào là ảnh hiện ngay chứ không phải đợi tải lại lần 2.
 function fetchDeviceImage(device) {
@@ -462,9 +616,13 @@ function fetchDeviceImage(device) {
     let thumb = await wikiThumbFor(primaryQuery, device);
     if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikiThumbFor(fallbackQuery, device);
 
-    // 2) Nếu Wikipedia không có (máy mới/ít phổ biến), thử Wikidata như lớp bổ sung
+    // 2) Nếu Wikipedia không có (máy mới/ít phổ biến), thử Wikidata
     if (!thumb) thumb = await wikidataThumbFor(primaryQuery, device);
     if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikidataThumbFor(fallbackQuery, device);
+
+    // 3) Nếu cả hai đều không có, tìm thẳng trên Wikimedia Commons (bắt được nhiều máy mới hơn)
+    if (!thumb) thumb = await commonsSearchThumbFor(primaryQuery, device);
+    if (!thumb && fallbackQuery !== primaryQuery) thumb = await commonsSearchThumbFor(fallbackQuery, device);
 
     return thumb;
   })();
@@ -501,7 +659,9 @@ function showResult(device) {
   const values = computeSensitivity(device);
 
   resultDeviceName.textContent = device.name;
-  resultDeviceMeta.textContent = `${device.screen}" · ${device.ppi} PPI · ${device.refresh}Hz · ${device.ram}GB RAM · ${device.year}`;
+  resultDeviceMeta.textContent =
+    `${device.screen}" · ${device.ppi} PPI · ${device.refresh}Hz · ${device.ram}GB RAM · ${device.year}` +
+    (device.estimated ? " · thông số ước tính" : "");
 
   const photoBox = document.getElementById("resultPhoto");
   photoBox.classList.add("is-loading");

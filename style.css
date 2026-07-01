@@ -423,6 +423,20 @@ section.panel {
   line-height: 1.4;
 }
 
+.est-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #ffb020;
+  border: 1px solid rgba(255, 176, 32, 0.5);
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
 .device-card-btn {
   background: transparent;
   border: 1px solid var(--line);
