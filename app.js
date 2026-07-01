@@ -23,9 +23,8 @@ function computeSensitivity(device) {
   const cameraTuDo = Math.round(clamp(62 + tierNorm * 24 + ramNorm * 8, 50, 150));
 
   const dpi = Math.round(clamp(360 + ppiNorm * 340 + tierNorm * 160 + refreshNorm * 60, 300, 1000));
-  // Kích thước nút bắn tính theo % màn hình, tối đa 100%. Đa số máy tầm trung/phổ thông sẽ rơi vào khoảng dưới 60%,
-  // chỉ những máy cấu hình mạnh (tier cao, nhiều RAM) mới đẩy lên gần mức tối đa.
-  const fireButtonSize = Math.round(clamp(28 + tierNorm * 38 + ramNorm * 14, 30, 100));
+  // Kích thước nút bắn tính theo % màn hình. Giữ trong khoảng 20-50, máy cấu hình mạnh hơn thì nhích lên gần 50.
+  const fireButtonSize = Math.round(clamp(24 + tierNorm * 18 + ramNorm * 6, 21, 49));
 
   return {
     lookAround, hongTam, scope2x, scope4x, sungNgam, cameraTuDo, dpi, fireButtonSize
@@ -374,26 +373,56 @@ async function wikiThumbFor(query) {
   }
 }
 
-async function fetchDeviceImage(device) {
+// Nguồn ảnh dự phòng khi bài Wikipedia không có ảnh đại diện: tìm trực tiếp trên Wikimedia Commons
+async function commonsThumbFor(query) {
+  try {
+    const searchUrl =
+      "https://commons.wikimedia.org/w/api.php?origin=*&action=query&list=search&srnamespace=6&srlimit=1&format=json&srsearch=" +
+      encodeURIComponent(query);
+    const searchRes = await fetch(searchUrl);
+    const searchJson = await searchRes.json();
+    const title = searchJson && searchJson.query && searchJson.query.search && searchJson.query.search[0] && searchJson.query.search[0].title;
+    if (!title) return null;
+
+    const infoUrl =
+      "https://commons.wikimedia.org/w/api.php?origin=*&action=query&titles=" +
+      encodeURIComponent(title) +
+      "&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json";
+    const infoRes = await fetch(infoUrl);
+    const infoJson = await infoRes.json();
+    const pages = infoJson.query && infoJson.query.pages;
+    if (!pages) return null;
+    const page = Object.values(pages)[0];
+    const info = page && page.imageinfo && page.imageinfo[0];
+    return (info && (info.thumburl || info.url)) || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Cache theo Promise (không chỉ theo giá trị) để khung ảnh trong lưới và khung ảnh ở trang kết quả
+// dùng chung đúng 1 lần tải — bấm vào là ảnh hiện ngay chứ không phải đợi tải lại lần 2.
+function fetchDeviceImage(device) {
   const key = device.id;
   if (imageCache.has(key)) return imageCache.get(key);
 
-  // Nhiều tên máy đã có sẵn tên hãng ở đầu (vd "ASUS ROG Phone 5", "Samsung Galaxy S24").
-  // Nếu ghép thêm brand vào sẽ bị lặp từ ("ASUS ASUS ROG Phone 5") khiến Wikipedia không tìm ra trang.
-  const nameStartsWithBrand = device.name.toLowerCase().startsWith(device.brand.toLowerCase());
-  const primaryQuery = nameStartsWithBrand ? device.name : `${device.brand} ${device.name}`;
-  const fallbackQuery = `${device.brand} ${device.name}`;
+  const promise = (async () => {
+    // Nhiều tên máy đã có sẵn tên hãng ở đầu (vd "ASUS ROG Phone 5", "Samsung Galaxy S24").
+    // Nếu ghép thêm brand vào sẽ bị lặp từ ("ASUS ASUS ROG Phone 5") khiến Wikipedia không tìm ra trang.
+    const nameStartsWithBrand = device.name.toLowerCase().startsWith(device.brand.toLowerCase());
+    const primaryQuery = nameStartsWithBrand ? device.name : `${device.brand} ${device.name}`;
+    const fallbackQuery = `${device.brand} ${device.name}`;
 
-  let thumb = await wikiThumbFor(primaryQuery);
-  if (!thumb && fallbackQuery !== primaryQuery) {
-    thumb = await wikiThumbFor(fallbackQuery);
-  }
-  if (!thumb) {
-    thumb = await wikiThumbFor(device.name);
-  }
+    let thumb = await wikiThumbFor(primaryQuery);
+    if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikiThumbFor(fallbackQuery);
+    if (!thumb) thumb = await wikiThumbFor(device.name);
+    if (!thumb) thumb = await commonsThumbFor(primaryQuery);
+    if (!thumb && fallbackQuery !== primaryQuery) thumb = await commonsThumbFor(fallbackQuery);
+    return thumb;
+  })();
 
-  imageCache.set(key, thumb);
-  return thumb;
+  imageCache.set(key, promise);
+  return promise;
 }
 
 let debounceTimer = null;
