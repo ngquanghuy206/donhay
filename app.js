@@ -387,6 +387,64 @@ async function wikiThumbFor(query, device) {
   }
 }
 
+// Các loại thực thể Wikidata coi là "điện thoại/thiết bị di động" hợp lệ.
+// Dùng để lọc bỏ kết quả tìm nhầm (ví dụ tìm ra 1 bài báo, 1 công ty, 1 tòa nhà...).
+const WIKIDATA_PHONE_TYPES = new Set([
+  "Q19723451", // smartphone model
+  "Q22645", // mobile phone
+  "Q5082128", // smartphone
+  "Q15102060" // phone model
+]);
+
+// Đệ quy kiểm tra P31 (instance of) và P279 (subclass of) của 1 entity Wikidata
+// xem có thuộc nhóm điện thoại hay không, để tránh gắn nhầm ảnh từ 1 trang không liên quan.
+function wikidataIsPhoneEntity(entity) {
+  const claims = entity.claims || {};
+  const relations = [...(claims.P31 || []), ...(claims.P279 || [])];
+  for (const rel of relations) {
+    const val = rel.mainsnak && rel.mainsnak.datavalue && rel.mainsnak.datavalue.value;
+    const id = val && val.id;
+    if (id && WIKIDATA_PHONE_TYPES.has(id)) return true;
+  }
+  return false;
+}
+
+// Lấy ảnh máy từ Wikidata — dùng làm lớp tra cứu BỔ SUNG khi Wikipedia không có trang/ảnh riêng
+// (ví dụ các model mới hoặc ít phổ biến hơn). Có lọc 2 lớp để không dính ảnh sai:
+// 1) tên trang khớp đủ với tên máy (isRelevantTitle)
+// 2) entity Wikidata thực sự là điện thoại/model điện thoại (P31/P279)
+async function wikidataThumbFor(query, device) {
+  try {
+    const searchUrl =
+      "https://www.wikidata.org/w/api.php?origin=*&action=wbsearchentities&format=json&language=en&type=item&limit=5&search=" +
+      encodeURIComponent(query);
+    const searchRes = await fetch(searchUrl);
+    const searchJson = await searchRes.json();
+    const candidates = (searchJson && searchJson.search) || [];
+
+    for (const cand of candidates) {
+      const label = cand.label;
+      if (!label || !isRelevantTitle(label, device)) continue;
+
+      const entityUrl = `https://www.wikidata.org/wiki/Special:EntityData/${cand.id}.json`;
+      const entityRes = await fetch(entityUrl);
+      const entityJson = await entityRes.json();
+      const entity = entityJson.entities && entityJson.entities[cand.id];
+      if (!entity || !wikidataIsPhoneEntity(entity)) continue;
+
+      const imageClaim = entity.claims && entity.claims.P18 && entity.claims.P18[0];
+      const fileName =
+        imageClaim && imageClaim.mainsnak.datavalue && imageClaim.mainsnak.datavalue.value;
+      if (!fileName) continue;
+
+      return "https://commons.wikimedia.org/wiki/Special:FilePath/" + encodeURIComponent(fileName) + "?width=600";
+    }
+    return null;
+  } catch (err) {
+    return null;
+  }
+}
+
 // Cache theo Promise (không chỉ theo giá trị) để khung ảnh trong lưới và khung ảnh ở trang kết quả
 // dùng chung đúng 1 lần tải — bấm vào là ảnh hiện ngay chứ không phải đợi tải lại lần 2.
 function fetchDeviceImage(device) {
@@ -400,8 +458,14 @@ function fetchDeviceImage(device) {
     const primaryQuery = nameStartsWithBrand ? device.name : `${device.brand} ${device.name}`;
     const fallbackQuery = `${device.brand} ${device.name}`;
 
+    // 1) Ưu tiên Wikipedia trước (ổn định, ảnh chất lượng cao cho các máy phổ biến)
     let thumb = await wikiThumbFor(primaryQuery, device);
     if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikiThumbFor(fallbackQuery, device);
+
+    // 2) Nếu Wikipedia không có (máy mới/ít phổ biến), thử Wikidata như lớp bổ sung
+    if (!thumb) thumb = await wikidataThumbFor(primaryQuery, device);
+    if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikidataThumbFor(fallbackQuery, device);
+
     return thumb;
   })();
 
