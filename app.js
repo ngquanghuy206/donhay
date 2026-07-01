@@ -346,10 +346,23 @@ function initialsOf(name) {
 
 const imageCache = new Map();
 
+// Kiểm tra trang Wikipedia tìm được có thực sự khớp với tên máy không, để tránh việc
+// opensearch "đoán bừa" ra một trang không liên quan (tòa nhà, phong cảnh, v.v.) khi máy đó chưa có bài viết riêng.
+function isRelevantTitle(title, device) {
+  const t = title.toLowerCase();
+  const tokens = device.name.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return true;
+  let matched = 0;
+  tokens.forEach((tok) => {
+    if (t.includes(tok)) matched++;
+  });
+  return matched / tokens.length >= 0.6;
+}
+
 // Lấy ảnh thật của máy từ Wikipedia theo 2 bước cho chính xác:
 // B1: opensearch để tìm ĐÚNG tên trang Wikipedia khớp với tên máy
 // B2: dùng REST summary API lấy ảnh đại diện (thumbnail) của đúng trang đó
-async function wikiThumbFor(query) {
+async function wikiThumbFor(query, device) {
   try {
     const searchUrl =
       "https://en.wikipedia.org/w/api.php?origin=*&action=opensearch&format=json&namespace=0&limit=1&search=" +
@@ -358,6 +371,7 @@ async function wikiThumbFor(query) {
     const searchJson = await searchRes.json();
     const title = searchJson && searchJson[1] && searchJson[1][0];
     if (!title) return null;
+    if (!isRelevantTitle(title, device)) return null;
 
     const summaryUrl =
       "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(title.replace(/ /g, "_"));
@@ -368,33 +382,6 @@ async function wikiThumbFor(query) {
       (summaryJson.originalimage && summaryJson.originalimage.source) ||
       null
     );
-  } catch (err) {
-    return null;
-  }
-}
-
-// Nguồn ảnh dự phòng khi bài Wikipedia không có ảnh đại diện: tìm trực tiếp trên Wikimedia Commons
-async function commonsThumbFor(query) {
-  try {
-    const searchUrl =
-      "https://commons.wikimedia.org/w/api.php?origin=*&action=query&list=search&srnamespace=6&srlimit=1&format=json&srsearch=" +
-      encodeURIComponent(query);
-    const searchRes = await fetch(searchUrl);
-    const searchJson = await searchRes.json();
-    const title = searchJson && searchJson.query && searchJson.query.search && searchJson.query.search[0] && searchJson.query.search[0].title;
-    if (!title) return null;
-
-    const infoUrl =
-      "https://commons.wikimedia.org/w/api.php?origin=*&action=query&titles=" +
-      encodeURIComponent(title) +
-      "&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json";
-    const infoRes = await fetch(infoUrl);
-    const infoJson = await infoRes.json();
-    const pages = infoJson.query && infoJson.query.pages;
-    if (!pages) return null;
-    const page = Object.values(pages)[0];
-    const info = page && page.imageinfo && page.imageinfo[0];
-    return (info && (info.thumburl || info.url)) || null;
   } catch (err) {
     return null;
   }
@@ -413,11 +400,8 @@ function fetchDeviceImage(device) {
     const primaryQuery = nameStartsWithBrand ? device.name : `${device.brand} ${device.name}`;
     const fallbackQuery = `${device.brand} ${device.name}`;
 
-    let thumb = await wikiThumbFor(primaryQuery);
-    if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikiThumbFor(fallbackQuery);
-    if (!thumb) thumb = await wikiThumbFor(device.name);
-    if (!thumb) thumb = await commonsThumbFor(primaryQuery);
-    if (!thumb && fallbackQuery !== primaryQuery) thumb = await commonsThumbFor(fallbackQuery);
+    let thumb = await wikiThumbFor(primaryQuery, device);
+    if (!thumb && fallbackQuery !== primaryQuery) thumb = await wikiThumbFor(fallbackQuery, device);
     return thumb;
   })();
 
