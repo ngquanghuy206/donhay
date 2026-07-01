@@ -34,6 +34,35 @@ function computeSensitivity(device) {
 
 const state = { os: null, device: null };
 
+// Domain chính thức của từng hãng để lấy logo thật (favicon chất lượng cao)
+const BRAND_DOMAIN = {
+  Samsung: "samsung.com",
+  Xiaomi: "mi.com",
+  Redmi: "mi.com",
+  POCO: "po.co",
+  OPPO: "oppo.com",
+  vivo: "vivo.com",
+  realme: "realme.com",
+  OnePlus: "oneplus.com",
+  Google: "google.com",
+  ASUS: "asus.com",
+  Nothing: "nothing.tech",
+  Sony: "sony.com",
+  Motorola: "motorola.com",
+  Nokia: "nokia.com",
+  Infinix: "infinixmobility.com",
+  Tecno: "tecno-mobile.com",
+  itel: "itel-mobile.com"
+};
+
+function brandLogoIcon(brand) {
+  const domain = BRAND_DOMAIN[brand];
+  if (!domain) return `<span class="os-badge-text">${initialsOf(brand)}</span>`;
+  return `<img src="https://www.google.com/s2/favicons?sz=128&domain=${domain}" alt="${brand}" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'os-badge-text',textContent:'${initialsOf(
+    brand
+  )}'}))" />`;
+}
+
 // Tách phần Android ra thành từng hãng riêng (Samsung 1 ô, OPPO 1 ô, ...),
 // giữ nguyên iOS và HarmonyOS làm 1 ô như cũ.
 function buildPlatformList() {
@@ -46,7 +75,7 @@ function buildPlatformList() {
     vendor: "Android",
     baseOs: "android",
     brand,
-    initials: initialsOf(brand)
+    icon: brandLogoIcon(brand)
   }));
   const iosPlatform = OS_LIST.find((o) => o.id === "ios");
   const harmonyPlatform = OS_LIST.find((o) => o.id === "harmony");
@@ -131,7 +160,7 @@ function renderOsGrid() {
   osGrid.innerHTML = PLATFORM_LIST.map(
     (p) => `
       <button class="os-card" data-os="${p.id}">
-        <span class="os-badge">${p.icon ? p.icon : `<span class="os-badge-text">${p.initials}</span>`}</span>
+        <span class="os-badge">${p.icon}</span>
         <span class="os-name">${p.name}</span>
         <span class="os-vendor">${p.vendor}</span>
       </button>`
@@ -321,11 +350,7 @@ const imageCache = new Map();
 // Lấy ảnh thật của máy từ Wikipedia theo 2 bước cho chính xác:
 // B1: opensearch để tìm ĐÚNG tên trang Wikipedia khớp với tên máy
 // B2: dùng REST summary API lấy ảnh đại diện (thumbnail) của đúng trang đó
-async function fetchDeviceImage(device) {
-  const key = device.id;
-  if (imageCache.has(key)) return imageCache.get(key);
-
-  const query = `${device.brand} ${device.name}`;
+async function wikiThumbFor(query) {
   try {
     const searchUrl =
       "https://en.wikipedia.org/w/api.php?origin=*&action=opensearch&format=json&namespace=0&limit=1&search=" +
@@ -333,26 +358,42 @@ async function fetchDeviceImage(device) {
     const searchRes = await fetch(searchUrl);
     const searchJson = await searchRes.json();
     const title = searchJson && searchJson[1] && searchJson[1][0];
-    if (!title) {
-      imageCache.set(key, null);
-      return null;
-    }
+    if (!title) return null;
 
     const summaryUrl =
       "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(title.replace(/ /g, "_"));
     const summaryRes = await fetch(summaryUrl);
     const summaryJson = await summaryRes.json();
-    const thumb =
+    return (
       (summaryJson.thumbnail && summaryJson.thumbnail.source) ||
       (summaryJson.originalimage && summaryJson.originalimage.source) ||
-      null;
-
-    imageCache.set(key, thumb);
-    return thumb;
+      null
+    );
   } catch (err) {
-    imageCache.set(key, null);
     return null;
   }
+}
+
+async function fetchDeviceImage(device) {
+  const key = device.id;
+  if (imageCache.has(key)) return imageCache.get(key);
+
+  // Nhiều tên máy đã có sẵn tên hãng ở đầu (vd "ASUS ROG Phone 5", "Samsung Galaxy S24").
+  // Nếu ghép thêm brand vào sẽ bị lặp từ ("ASUS ASUS ROG Phone 5") khiến Wikipedia không tìm ra trang.
+  const nameStartsWithBrand = device.name.toLowerCase().startsWith(device.brand.toLowerCase());
+  const primaryQuery = nameStartsWithBrand ? device.name : `${device.brand} ${device.name}`;
+  const fallbackQuery = `${device.brand} ${device.name}`;
+
+  let thumb = await wikiThumbFor(primaryQuery);
+  if (!thumb && fallbackQuery !== primaryQuery) {
+    thumb = await wikiThumbFor(fallbackQuery);
+  }
+  if (!thumb) {
+    thumb = await wikiThumbFor(device.name);
+  }
+
+  imageCache.set(key, thumb);
+  return thumb;
 }
 
 let debounceTimer = null;

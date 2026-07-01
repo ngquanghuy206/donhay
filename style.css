@@ -248,6 +248,13 @@ section.panel {
   height: 24px;
 }
 
+.os-badge img {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
 .os-badge-text {
   font-family: var(--font-display);
   font-weight: 700;
