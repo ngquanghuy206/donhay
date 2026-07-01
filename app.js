@@ -113,13 +113,23 @@ function findPlatformForDevice(device) {
   return PLATFORM_LIST.find((p) => p.baseOs === device.os);
 }
 
-// ============ Tự động bổ sung TÊN MÁY mới theo hãng qua Wikidata SPARQL ============
-// Mục đích: data.js chỉ chứa danh sách gõ tay (hữu hạn). Lớp này gọi API Wikidata Query Service
-// (miễn phí, không cần key, hỗ trợ CORS) để lấy thêm các model điện thoại của cùng hãng mà
-// data.js chưa có, rồi UỚC TÍNH thông số (màn hình/PPI/tần số quét/RAM/tier) theo năm ra mắt.
-// Các máy này được đánh dấu estimated:true để người dùng biết đây là số ước tính, không phải
-// số đo thực tế như các máy đã được nhập tay.
+// ============ Tự động bổ sung TÊN MÁY theo hãng qua 2 nguồn API ============
+// Mục đích: data.js chỉ chứa danh sách gõ tay (hữu hạn). 2 lớp dưới đây gọi API để lấy thêm
+// các model điện thoại của cùng hãng mà data.js chưa có:
+//  1) Back4App "Cell Phone Dataset" — dữ liệu THẬT (màn hình/PPI/RAM đo thật), nhiều máy
+//     cũ/tầm trung (dữ liệu gốc dừng khoảng 2013-2017, không có tần số quét).
+//  2) Wikidata SPARQL — bổ sung thêm các máy MỚI/flagship mà Back4App chưa có.
+// Các thông số Back4App không cung cấp (tần số quét, tier...) và toàn bộ thông số từ Wikidata
+// đều được ƯỚC TÍNH theo năm ra mắt, đánh dấu estimated:true để người dùng biết rõ.
 const wikidataBrandCache = new Map();
+const back4appBrandCache = new Map();
+
+const BACK4APP_CONFIG = {
+  appId: "Oi6ZV2c0Yi52c66yJy5pRZXjQzEO13IQA0IHbci6",
+  restKey: "1SCkdow2T8WpTiTkvO8CXJkZ7KuRws9oWqwx4oYA",
+  baseUrl: "https://parseapi.back4app.com",
+  className: "Dataset_Cell_Phones_Model_Brand"
+};
 
 function normalizeName(n) {
   return n.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -137,8 +147,78 @@ function estimateSpecsForYear(year) {
   return { screen: clamp(screen, 4.7, 7.6), ppi, refresh, ram, tier };
 }
 
-// Gọi Wikidata Query Service: tìm mọi entity là "smartphone model" có hãng sản xuất (P176)
-// trùng tên hãng đang xét. Có cache theo Promise để 1 hãng chỉ gọi API đúng 1 lần / phiên.
+// ---- Back4App: đọc thông số THẬT từ dataset GSMArena đã clone ----
+function parseAnnouncedYear(str) {
+  if (!str) return null;
+  const m = str.match(/(20\d{2}|19\d{2})/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Cột "Display_resolution" trong dataset này thực ra chứa SỐ INCH màn hình (bị đặt tên ngược).
+function parseScreenInches(str) {
+  if (!str) return null;
+  const m = str.match(/([\d.]+)\s*inches/i);
+  return m ? parseFloat(m[1]) : null;
+}
+
+// Cột "Display_size" trong dataset này thực ra chứa ĐỘ PHÂN GIẢI + mật độ điểm ảnh (ppi).
+function parsePpi(str) {
+  if (!str) return null;
+  const m = str.match(/~?(\d+)\s*ppi/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function parseRamGb(str) {
+  if (!str || /undefined/i.test(str)) return null;
+  const gb = [...str.matchAll(/([\d.]+)\s*GB/gi)].map((m) => parseFloat(m[1]));
+  if (gb.length) return Math.max(...gb);
+  const mb = [...str.matchAll(/([\d.]+)\s*MB/gi)].map((m) => parseFloat(m[1]) / 1024);
+  if (mb.length) return Math.max(...mb);
+  return null;
+}
+
+function fetchBack4AppModelsForBrand(brandName) {
+  if (back4appBrandCache.has(brandName)) return back4appBrandCache.get(brandName);
+
+  const promise = (async () => {
+    try {
+      const safeBrand = brandName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const where = { Brand: { $regex: "^" + safeBrand + "$", $options: "i" } };
+      const url =
+        `${BACK4APP_CONFIG.baseUrl}/classes/${BACK4APP_CONFIG.className}` +
+        `?limit=1000&keys=Brand,Model,RAM,Display_resolution,Display_size,Announced,Status` +
+        `&where=${encodeURIComponent(JSON.stringify(where))}`;
+      const res = await fetch(url, {
+        headers: {
+          "X-Parse-Application-Id": BACK4APP_CONFIG.appId,
+          "X-Parse-REST-API-Key": BACK4APP_CONFIG.restKey
+        }
+      });
+      const json = await res.json();
+      const rows = json.results || [];
+      return rows
+        .map((r) => {
+          const model = (r.Model || "").replace(/^_+/, "").trim();
+          if (!model) return null;
+          return {
+            model,
+            year: parseAnnouncedYear(r.Announced),
+            screen: parseScreenInches(r.Display_resolution),
+            ppi: parsePpi(r.Display_size),
+            ram: parseRamGb(r.RAM)
+          };
+        })
+        .filter(Boolean);
+    } catch (err) {
+      return [];
+    }
+  })();
+
+  back4appBrandCache.set(brandName, promise);
+  return promise;
+}
+
+// ---- Wikidata: bổ sung máy mới/flagship mà Back4App (dữ liệu cũ) chưa có ----
 function fetchWikidataModelsForBrand(brandName) {
   if (wikidataBrandCache.has(brandName)) return wikidataBrandCache.get(brandName);
 
@@ -184,8 +264,8 @@ function fetchWikidataModelsForBrand(brandName) {
   return promise;
 }
 
-// Bổ sung DEVICES với các máy lấy được từ Wikidata mà data.js chưa có (so khớp tên đã chuẩn hoá,
-// bỏ qua nếu tên gần giống 1 máy đã tồn tại để tránh trùng lặp). Trả về true nếu có thêm máy mới.
+// Bổ sung DEVICES từ cả 2 nguồn, so khớp tên đã chuẩn hoá để tránh trùng lặp.
+// Trả về true nếu có thêm máy mới.
 async function augmentDevicesForPlatform(platform) {
   const brandName = platform.baseOs === "android" ? platform.brand : platform.name;
   if (!brandName) return false;
@@ -194,11 +274,42 @@ async function augmentDevicesForPlatform(platform) {
     platform.baseOs === "android" ? dv.brand === brandName : dv.os === platform.baseOs
   );
   const existingNorm = sameGroup.map((dv) => normalizeName(dv.name));
-
-  const results = await fetchWikidataModelsForBrand(brandName);
+  const targetOs = platform.baseOs === "android" ? "android" : platform.baseOs;
   let added = false;
 
-  results.forEach((r) => {
+  const [b4aResults, wdResults] = await Promise.all([
+    fetchBack4AppModelsForBrand(brandName),
+    fetchWikidataModelsForBrand(brandName)
+  ]);
+
+  b4aResults.forEach((r) => {
+    if (!r.year || r.year < 2010) return;
+    const fullName = `${brandName} ${r.model}`.trim();
+    const norm = normalizeName(fullName);
+    const isDup = existingNorm.some((ex) => ex === norm || ex.includes(norm) || norm.includes(ex));
+    if (isDup) return;
+    const id = "b4a-" + norm;
+    if (DEVICES.some((dv) => dv.id === id)) return;
+
+    const fallback = estimateSpecsForYear(r.year);
+    DEVICES.push({
+      id,
+      name: fullName,
+      brand: brandName,
+      os: targetOs,
+      screen: r.screen || fallback.screen,
+      ppi: r.ppi || fallback.ppi,
+      refresh: fallback.refresh, // dataset không có tần số quét
+      ram: r.ram || fallback.ram,
+      tier: fallback.tier,
+      year: r.year,
+      estimated: true
+    });
+    existingNorm.push(norm);
+    added = true;
+  });
+
+  wdResults.forEach((r) => {
     if (!r.year || r.year < 2014) return;
     const norm = normalizeName(r.name);
     const isDup = existingNorm.some((ex) => ex === norm || ex.includes(norm) || norm.includes(ex));
@@ -211,7 +322,7 @@ async function augmentDevicesForPlatform(platform) {
       id,
       name: r.name,
       brand: brandName,
-      os: platform.baseOs === "android" ? "android" : platform.baseOs,
+      os: targetOs,
       screen: specs.screen,
       ppi: specs.ppi,
       refresh: specs.refresh,
