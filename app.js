@@ -52,7 +52,6 @@ const BRAND_DOMAIN = {
   Infinix: "infinixmobility.com",
   Tecno: "tecno-mobile.com",
   itel: "itel-mobile.com",
-  // Bổ sung cho các hãng có thể tự phát hiện thêm qua API (Back4App)
   BlackBerry: "blackberry.com",
   Lenovo: "lenovo.com",
   Panasonic: "panasonic.com",
@@ -80,7 +79,7 @@ function brandLogoIcon(brand) {
 
 // Tách phần Android ra thành từng hãng riêng (Samsung 1 ô, OPPO 1 ô, ...),
 // giữ nguyên iOS và HarmonyOS làm 1 ô như cũ.
-// extraBrands: tên hãng lấy thêm được từ Back4App (ngoài các hãng đã gõ tay trong data.js).
+// extraBrands: tên hãng lấy thêm được từ MobileAPI.dev (ngoài các hãng đã gõ tay trong data.js).
 function buildPlatformList(extraBrands = []) {
   const hardcodedBrands = [...new Set(DEVICES.filter((d) => d.os === "android").map((d) => d.brand))];
   const existingNorm = new Set(hardcodedBrands.map(normalizeName));
@@ -138,29 +137,10 @@ function findPlatformForDevice(device) {
   return PLATFORM_LIST.find((p) => p.baseOs === device.os);
 }
 
-// ============ Tự động bổ sung TÊN MÁY theo hãng qua 2 nguồn API ============
-// Mục đích: data.js chỉ chứa danh sách gõ tay (hữu hạn). 2 lớp dưới đây gọi API để lấy thêm
-// các model điện thoại của cùng hãng mà data.js chưa có:
-//  1) Back4App "Cell Phone Dataset" — dữ liệu THẬT (màn hình/PPI/RAM đo thật), nhiều máy
-//     cũ/tầm trung (dữ liệu gốc dừng khoảng 2013-2017, không có tần số quét).
-//  2) Wikidata SPARQL — bổ sung thêm các máy MỚI/flagship mà Back4App chưa có.
-// Các thông số Back4App không cung cấp (tần số quét, tier...) và toàn bộ thông số từ Wikidata
-// đều được ƯỚC TÍNH theo năm ra mắt, đánh dấu estimated:true để người dùng biết rõ.
-const wikidataBrandCache = new Map();
-const back4appBrandCache = new Map();
+// ============ Tự động bổ sung TÊN MÁY qua MobileAPI.dev ============
+// Mục đích: data.js chỉ chứa danh sách gõ tay (hữu hạn). Hàm dưới đây gọi MobileAPI.dev
+// để lấy thêm các model và hãng mà data.js chưa có.
 
-const BACK4APP_CONFIG = {
-  appId: "Oi6ZV2c0Yi52c66yJy5pRZXjQzEO13IQA0IHbci6",
-  restKey: "1SCkdow2T8WpTiTkvO8CXJkZ7KuRws9oWqwx4oYA",
-  baseUrl: "https://parseapi.back4app.com",
-  className: "Dataset_Cell_Phones_Model_Brand"
-};
-
-// MobileAPI.dev — nguồn thứ 3, có ảnh thật kèm sẵn (base64) trong response, gói free
-// 1.000 request/tháng. Endpoint /devices/search/ đã xác nhận qua tài liệu thật (không đoán mò
-// như Back4App lúc trước), nhưng KHÔNG có endpoint "liệt kê toàn bộ máy 1 hãng mà không cần
-// từ khoá" chắc chắn, nên ta tận dụng chính /devices/search/ với name=tên hãng (tìm mờ/fuzzy)
-// rồi phân trang tới khi hết, đó là cách "quét toàn bộ" khả thi nhất với 1 endpoint xác nhận được.
 const MOBILEAPI_CONFIG = {
   baseUrl: "https://api.mobileapi.dev",
   apiKey: "f483213689edc132ad7e06dc306b310e2ed4b7ea"
@@ -170,104 +150,14 @@ function normalizeName(n) {
   return n.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// ---- Khám phá TOÀN BỘ danh sách hãng có trong Back4App ----
-// Back4App/Parse có cách "chuẩn" để lấy danh sách giá trị duy nhất của 1 cột là
 // /aggregate?distinct=Brand, NHƯNG cách đó bắt buộc phải dùng Master Key (key toàn quyền,
 // bỏ qua mọi luật bảo mật). Master Key TUYỆT ĐỐI không được đặt trong code chạy ở trình
 // duyệt người dùng — bất kỳ ai mở DevTools/Network tab cũng lấy được và có thể xoá/sửa/ghi
 // đè toàn bộ dataset của app. Vì vậy hàm dưới đây chỉ dùng REST API Key (key giới hạn quyền,
 // an toàn hơn khi lộ ra): gọi API nhiều lần, mỗi lần chỉ lấy cột "Brand" của 1000 dòng, phân
 // trang bằng skip, rồi tự gộp trùng (dedupe) ở phía JS để suy ra danh sách hãng đầy đủ.
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Gọi 1 trang, có thử lại tối đa 2 lần nếu lỗi mạng/API tạm thời (vd bị giới hạn tốc độ request
-// trên gói free của Back4App). Ném lỗi thật (kèm status/nội dung) nếu vẫn thất bại sau khi thử lại.
-async function fetchBrandPageWithRetry(page, pageSize, attempt = 0) {
-  const url =
-    `${BACK4APP_CONFIG.baseUrl}/classes/${BACK4APP_CONFIG.className}` +
-    `?limit=${pageSize}&skip=${page * pageSize}&keys=Brand`;
-  let res;
-  try {
-    res = await fetch(url, {
-      headers: {
-        "X-Parse-Application-Id": BACK4APP_CONFIG.appId,
-        "X-Parse-REST-API-Key": BACK4APP_CONFIG.restKey
-      }
-    });
-  } catch (networkErr) {
-    // fetch() tự nó throw khi mất mạng/bị chặn CORS (không có status code để đọc)
-    if (attempt < 2) {
-      await sleep(400 * (attempt + 1));
-      return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
-    }
-    throw new Error(`Lỗi mạng khi gọi trang ${page} (${networkErr && networkErr.message})`);
-  }
 
-  const raw = await res.text();
-  let json;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    // Server trả về thứ không phải JSON (vd trang lỗi HTML của gateway/rate-limit)
-    if (attempt < 2) {
-      await sleep(400 * (attempt + 1));
-      return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
-    }
-    throw new Error(`HTTP ${res.status}, phản hồi không phải JSON: ${raw.slice(0, 120)}`);
-  }
-
-  if (!res.ok || json.error) {
-    if ((res.status === 401 || res.status === 403) && attempt === 0) {
-      // Lỗi quyền truy cập (CLP chưa bật Public Read, hoặc sai appId/restKey) — thử lại không
-      // ích gì vì bản chất là bị chặn quyền, không phải lỗi tạm thời. Báo ngay để không mất thời gian.
-      throw new Error(
-        `HTTP ${res.status}: ${json.error || "unauthorized"} — kiểm tra Class Level Permissions ` +
-          `(Public Read) của bảng ${BACK4APP_CONFIG.className} trên Back4App Dashboard, hoặc kiểm tra lại appId/restKey.`
-      );
-    }
-    // Các lỗi khác (vd vượt giới hạn request/giây của gói free, lỗi tạm thời phía server)
-    // thì thử lại vài lần trước khi báo lỗi thật.
-    if (attempt < 2) {
-      await sleep(500 * (attempt + 1));
-      return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
-    }
-    throw new Error(`HTTP ${res.status}: ${json.error || "không rõ lỗi"}`);
-  }
-
-  return json.results || [];
-}
-
-let brandDiscoveryPromise = null;
-function discoverAllBrandsFromBack4App() {
-  if (brandDiscoveryPromise) return brandDiscoveryPromise;
-
-  brandDiscoveryPromise = (async () => {
-    const seen = new Map(); // normalizeName -> tên hiển thị gốc (giữ đúng cách viết hoa đầu tiên gặp)
-    const pageSize = 1000;
-    const maxPages = 20; // chặn an toàn (~8.6k dòng / 1000 = ~9 trang), tránh vòng lặp vô hạn
-    try {
-      for (let page = 0; page < maxPages; page++) {
-        const rows = await fetchBrandPageWithRetry(page, pageSize);
-        rows.forEach((r) => {
-          const brand = (r.Brand || "").trim();
-          if (!brand) return;
-          const key = normalizeName(brand);
-          if (key && !seen.has(key)) seen.set(key, brand);
-        });
-        if (rows.length < pageSize) break; // hết dữ liệu, dừng phân trang
-        await sleep(150); // giãn nhịp request để tránh dính giới hạn tốc độ của gói free
-      }
-      return { brands: [...seen.values()], ok: true };
-    } catch (err) {
-      // Lỗi mạng/API: trả về những gì đã gom được (có thể rỗng) kèm cờ lỗi để UI báo đúng.
-      const message = String((err && err.message) || err);
-      console.error("[discoverAllBrandsFromBack4App] failed:", message, err);
-      return { brands: [...seen.values()], ok: false, error: message };
-    }
-  })();
-
-  return brandDiscoveryPromise;
-}
 
 // Ước tính thông số hợp lý theo năm ra mắt, dựa theo xu hướng chung của thị trường
 // (không chính xác 100% nhưng đủ dùng để tính độ nhạy tương đối).
@@ -281,82 +171,8 @@ function estimateSpecsForYear(year) {
   return { screen: clamp(screen, 4.7, 7.6), ppi, refresh, ram, tier };
 }
 
-// ---- Back4App: đọc thông số THẬT từ dataset GSMArena đã clone ----
-function parseAnnouncedYear(str) {
-  if (!str) return null;
-  const m = str.match(/(20\d{2}|19\d{2})/);
-  return m ? parseInt(m[1], 10) : null;
-}
 
-// Cột "Display_resolution" trong dataset này thực ra chứa SỐ INCH màn hình (bị đặt tên ngược).
-function parseScreenInches(str) {
-  if (!str) return null;
-  const m = str.match(/([\d.]+)\s*inches/i);
-  return m ? parseFloat(m[1]) : null;
-}
-
-// Cột "Display_size" trong dataset này thực ra chứa ĐỘ PHÂN GIẢI + mật độ điểm ảnh (ppi).
-function parsePpi(str) {
-  if (!str) return null;
-  const m = str.match(/~?(\d+)\s*ppi/i);
-  return m ? parseInt(m[1], 10) : null;
-}
-
-function parseRamGb(str) {
-  if (!str || /undefined/i.test(str)) return null;
-  const gb = [...str.matchAll(/([\d.]+)\s*GB/gi)].map((m) => parseFloat(m[1]));
-  if (gb.length) return Math.max(...gb);
-  const mb = [...str.matchAll(/([\d.]+)\s*MB/gi)].map((m) => parseFloat(m[1]) / 1024);
-  if (mb.length) return Math.max(...mb);
-  return null;
-}
-
-function fetchBack4AppModelsForBrand(brandName) {
-  if (back4appBrandCache.has(brandName)) return back4appBrandCache.get(brandName);
-
-  const promise = (async () => {
-    try {
-      const safeBrand = brandName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const where = { Brand: { $regex: "^" + safeBrand + "$", $options: "i" } };
-      const url =
-        `${BACK4APP_CONFIG.baseUrl}/classes/${BACK4APP_CONFIG.className}` +
-        `?limit=1000&keys=Brand,Model,RAM,Display_resolution,Display_size,Announced,Status` +
-        `&where=${encodeURIComponent(JSON.stringify(where))}`;
-      const res = await fetch(url, {
-        headers: {
-          "X-Parse-Application-Id": BACK4APP_CONFIG.appId,
-          "X-Parse-REST-API-Key": BACK4APP_CONFIG.restKey
-        }
-      });
-      const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      const rows = json.results || [];
-      const items = rows
-        .map((r) => {
-          const model = (r.Model || "").replace(/^_+/, "").trim();
-          if (!model) return null;
-          return {
-            model,
-            year: parseAnnouncedYear(r.Announced),
-            screen: parseScreenInches(r.Display_resolution),
-            ppi: parsePpi(r.Display_size),
-            ram: parseRamGb(r.RAM)
-          };
-        })
-        .filter(Boolean);
-      return { items, ok: true };
-    } catch (err) {
-      const message = String((err && err.message) || err);
-      console.error(`[fetchBack4AppModelsForBrand] "${brandName}" failed:`, message, err);
-      return { items: [], ok: false, error: message };
-    }
-  })();
-
-  back4appBrandCache.set(brandName, promise);
-  return promise;
-}
-
-// ---- Wikidata: bổ sung máy mới/flagship mà Back4App (dữ liệu cũ) chưa có ----
+// ---- Wikidata: bổ sung máy mới/flagship ----
 function fetchWikidataModelsForBrand(brandName) {
   if (wikidataBrandCache.has(brandName)) return wikidataBrandCache.get(brandName);
 
@@ -436,6 +252,35 @@ function extractMobileApiList(json) {
   return [];
 }
 
+// ---- Khám phá TOÀN BỘ danh sách hãng có trong MobileAPI.dev ----
+// Gọi /brands/ endpoint để lấy list hãng, sau đó buildPlatformList sẽ tạo ô cho từng hãng mới.
+// Nếu endpoint đó không tồn tại, fallback: dùng danh sách hãng gõ tay từ BRAND_DOMAIN.
+let brandDiscoveryPromise = null;
+function discoverAllBrandsFromMobileApi() {
+  if (brandDiscoveryPromise) return brandDiscoveryPromise;
+  brandDiscoveryPromise = (async () => {
+    try {
+      // Thử endpoint /brands/ trước (nếu MobileAPI.dev có)
+      const res = await fetch(`${MOBILEAPI_CONFIG.baseUrl}/brands/?key=${MOBILEAPI_CONFIG.apiKey}`);
+      if (res.status === 429) throw new Error("HTTP 429: hết quota MobileAPI.dev");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      // Response có thể là mảng string hoặc mảng object {name/brand}
+      const raw = Array.isArray(json) ? json
+                : Array.isArray(json.brands) ? json.brands
+                : Array.isArray(json.results) ? json.results
+                : Array.isArray(json.data) ? json.data : [];
+      const brands = raw.map(b => typeof b === "string" ? b : (b.name || b.brand || "")).filter(Boolean);
+      return { brands, ok: true };
+    } catch (err) {
+      // Fallback: trả về danh sách từ BRAND_DOMAIN (đã có sẵn trong code)
+      const brands = Object.keys(BRAND_DOMAIN);
+      return { brands, ok: false, error: String(err && err.message || err) };
+    }
+  })();
+  return brandDiscoveryPromise;
+}
+
 const mobileApiBrandCache = new Map();
 function fetchMobileApiModelsForBrand(brandName) {
   if (mobileApiBrandCache.has(brandName)) return mobileApiBrandCache.get(brandName);
@@ -502,43 +347,14 @@ async function augmentDevicesForPlatform(platform) {
   const targetOs = platform.baseOs === "android" ? "android" : platform.baseOs;
   let addedCount = 0;
 
-  const [b4a, wd, mapi] = await Promise.all([
-    fetchBack4AppModelsForBrand(brandName),
+  const [wd, mapi] = await Promise.all([
     fetchWikidataModelsForBrand(brandName),
     fetchMobileApiModelsForBrand(brandName)
   ]);
-  const b4aResults = b4a.items;
   const wdResults = wd.items;
   const mapiResults = mapi.items;
-  const ok = b4a.ok || wd.ok || mapi.ok;
-  const errorReason = !ok ? b4a.error || wd.error || mapi.error : null;
-
-  b4aResults.forEach((r) => {
-    if (!r.year || r.year < 2010) return;
-    const fullName = `${brandName} ${r.model}`.trim();
-    const norm = normalizeName(fullName);
-    const isDup = existingNorm.some((ex) => ex === norm || ex.includes(norm) || norm.includes(ex));
-    if (isDup) return;
-    const id = "b4a-" + norm;
-    if (DEVICES.some((dv) => dv.id === id)) return;
-
-    const fallback = estimateSpecsForYear(r.year);
-    DEVICES.push({
-      id,
-      name: fullName,
-      brand: brandName,
-      os: targetOs,
-      screen: r.screen || fallback.screen,
-      ppi: r.ppi || fallback.ppi,
-      refresh: fallback.refresh, // dataset không có tần số quét
-      ram: r.ram || fallback.ram,
-      tier: fallback.tier,
-      year: r.year,
-      estimated: true
-    });
-    existingNorm.push(norm);
-    addedCount++;
-  });
+  const ok = wd.ok || mapi.ok;
+  const errorReason = !ok ? wd.error || mapi.error : null;
 
   wdResults.forEach((r) => {
     if (!r.year || r.year < 2014) return;
@@ -673,7 +489,7 @@ function selectOs(platformId) {
   refreshFromWikidata(platform);
 }
 
-// Sau khi hiện danh sách máy có sẵn, gọi Back4App + Wikidata để bổ sung thêm các model
+// Sau khi hiện danh sách máy có sẵn, gọi MobileAPI.dev + Wikidata để bổ sung thêm các model
 // chưa có trong data.js. Có hiện trạng thái đang tải / kết quả / lỗi để người dùng biết
 // chắc API có chạy hay không, thay vì im lặng hoàn toàn như trước.
 function setSyncStatus(mode, text) {
@@ -1136,11 +952,10 @@ PLATFORM_LIST = buildPlatformList();
 renderAdmin();
 renderOsGrid();
 
-// Sau khi hiện lưới hãng/hệ điều hành mặc định, âm thầm quét toàn bộ Back4App để tìm thêm
-// những hãng mà data.js chưa có ô riêng (vd Sony Ericsson, BlackBerry, Lava...). Nếu có, tự
-// thêm ô mới vào lưới — không cần Master Key, chỉ đọc cột Brand qua REST Key như bình thường.
+// Sau khi hiện lưới hãng/hệ điều hành mặc định, âm thầm quét MobileAPI.dev để tìm thêm
+// những hãng mà data.js chưa có ô riêng. Nếu có, tự thêm ô mới vào lưới.
 setStatusEl(brandDiscoveryStatus, "is-loading", "Đang quét thêm hãng máy từ dữ liệu online...");
-discoverAllBrandsFromBack4App().then(({ brands, ok, error }) => {
+discoverAllBrandsFromMobileApi().then(({ brands, ok, error }) => {
   const rebuilt = buildPlatformList(brands);
   const addedBrandCount = rebuilt.length - PLATFORM_LIST.length;
   PLATFORM_LIST = rebuilt;
