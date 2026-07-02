@@ -620,3 +620,26 @@ footer.foot {
 @media (max-width: 520px) {
   .extra-stats { grid-template-columns: 1fr; }
 }
+
+/* ---- Loading spinner ---- */
+.grid-spinner {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 60px 0;
+}
+
+.grid-spinner::after {
+  content: "";
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255,255,255,0.12);
+  border-top-color: var(--silver-1, #cdd2d8);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

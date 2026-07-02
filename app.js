@@ -467,7 +467,7 @@ function renderOsGrid() {
   });
 }
 
-function selectOs(platformId) {
+async function selectOs(platformId) {
   state.os = platformId;
   state.device = null;
   const platform = getPlatform(platformId);
@@ -480,9 +480,27 @@ function selectOs(platformId) {
   searchInput.value = "";
   searchSuggestions.classList.remove("is-open");
   searchInput.placeholder = `Tìm dòng máy ${platform.name}, ví dụ: ${sampleDeviceFor(platform)}`;
-  renderDeviceGrid(devicesForPlatform(platform));
   searchInput.focus();
-  refreshFromWikidata(platform);
+
+  // Nếu đã cache rồi → render ngay, không cần chờ
+  const alreadyCached = wikidataBrandCache.has(platform.baseOs === "android" ? platform.brand : platform.vendor)
+    || mobileApiBrandCache.has(platform.baseOs === "android" ? platform.brand : platform.vendor);
+
+  if (alreadyCached) {
+    renderDeviceGrid(devicesForPlatform(platform));
+    refreshFromWikidata(platform);
+    return;
+  }
+
+  // Lần đầu bấm vào hãng: hiện skeleton rồi fetch API, sau đó render toàn bộ
+  deviceGrid.innerHTML = `<div class="grid-spinner"></div>`;
+  syncStatus.classList.add("hidden");
+  await augmentDevicesForPlatform(platform);
+  if (state.os !== platformId) return; // user đã đổi hãng khác rồi
+  const q = searchInput.value.trim().toLowerCase();
+  const all = devicesForPlatform(platform);
+  const filtered = q ? all.filter(dv => dv.name.toLowerCase().includes(q)) : all;
+  renderDeviceGrid(filtered);
 }
 
 // Sau khi hiện danh sách máy có sẵn, gọi MobileAPI.dev + Wikidata để bổ sung thêm các model
@@ -499,9 +517,8 @@ function setStatusEl(el, mode, text) {
 }
 
 function refreshFromWikidata(platform) {
-  // Ẩn status bar — không hiện "đang tải" hay thông báo nào
+  // Khi gọi hàm này, data đã cache → augment nhanh, cập nhật grid nếu có thêm máy
   syncStatus.classList.add("hidden");
-
   augmentDevicesForPlatform(platform).then(({ addedCount }) => {
     if (state.os !== platform.id) return;
     if (addedCount > 0) {
