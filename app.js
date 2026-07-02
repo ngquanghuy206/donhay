@@ -252,32 +252,15 @@ function extractMobileApiList(json) {
   return [];
 }
 
-// ---- Khám phá TOÀN BỘ danh sách hãng có trong MobileAPI.dev ----
-// Gọi /brands/ endpoint để lấy list hãng, sau đó buildPlatformList sẽ tạo ô cho từng hãng mới.
-// Nếu endpoint đó không tồn tại, fallback: dùng danh sách hãng gõ tay từ BRAND_DOMAIN.
+// ---- Khám phá danh sách hãng để tạo ô trên grid ----
+// MobileAPI.dev gói free không có endpoint liệt kê hãng (chỉ paid plan mới có,
+// và gọi từ browser bị CORS block). Dùng BRAND_DOMAIN làm nguồn hãng chuẩn.
+// Khi người dùng bấm vào ô hãng, fetchMobileApiModelsForBrand sẽ gọi /devices/search/
+// để tải toàn bộ dòng máy của hãng đó.
 let brandDiscoveryPromise = null;
 function discoverAllBrandsFromMobileApi() {
   if (brandDiscoveryPromise) return brandDiscoveryPromise;
-  brandDiscoveryPromise = (async () => {
-    try {
-      // Thử endpoint /brands/ trước (nếu MobileAPI.dev có)
-      const res = await fetch(`${MOBILEAPI_CONFIG.baseUrl}/brands/?key=${MOBILEAPI_CONFIG.apiKey}`);
-      if (res.status === 429) throw new Error("HTTP 429: hết quota MobileAPI.dev");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      // Response có thể là mảng string hoặc mảng object {name/brand}
-      const raw = Array.isArray(json) ? json
-                : Array.isArray(json.brands) ? json.brands
-                : Array.isArray(json.results) ? json.results
-                : Array.isArray(json.data) ? json.data : [];
-      const brands = raw.map(b => typeof b === "string" ? b : (b.name || b.brand || "")).filter(Boolean);
-      return { brands, ok: true };
-    } catch (err) {
-      // Fallback: trả về danh sách từ BRAND_DOMAIN (đã có sẵn trong code)
-      const brands = Object.keys(BRAND_DOMAIN);
-      return { brands, ok: false, error: String(err && err.message || err) };
-    }
-  })();
+  brandDiscoveryPromise = Promise.resolve({ brands: Object.keys(BRAND_DOMAIN), ok: true });
   return brandDiscoveryPromise;
 }
 
@@ -430,6 +413,7 @@ const quickSearchPanel = document.getElementById("quickSearchPanel");
 const osPanelTitle = document.getElementById("osPanelTitle");
 const syncStatus = document.getElementById("syncStatus");
 const brandDiscoveryStatus = document.getElementById("brandDiscoveryStatus");
+const searchSuggestions = document.getElementById("searchSuggestions");
 
 function renderAdmin() {
   document.getElementById("adminName").textContent = ADMIN_INFO.name;
@@ -483,6 +467,7 @@ function selectOs(platformId) {
   searchSection.classList.remove("hidden");
   resultSection.classList.add("hidden");
   searchInput.value = "";
+  searchSuggestions.classList.remove("is-open");
   searchInput.placeholder = `Tìm dòng máy ${platform.name}, ví dụ: ${sampleDeviceFor(platform)}`;
   renderDeviceGrid(devicesForPlatform(platform));
   searchInput.focus();
@@ -649,6 +634,7 @@ quickSearchInput.addEventListener("focus", () => {
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".search-wrap")) {
     quickSuggestions.classList.remove("is-open");
+    searchSuggestions.classList.remove("is-open");
   }
 });
 
@@ -842,6 +828,52 @@ function fetchDeviceImage(device) {
   return promise;
 }
 
+// ---- Dropdown gợi ý cho ô tìm kiếm trong màn hình chọn máy ----
+function renderSearchSuggestions(query) {
+  const q = query.trim().toLowerCase();
+  if (q.length === 0) {
+    searchSuggestions.innerHTML = "";
+    searchSuggestions.classList.remove("is-open");
+    return;
+  }
+  const platform = getPlatform(state.os);
+  if (!platform) return;
+  const all = devicesForPlatform(platform);
+  const matches = all.filter((dv) => dv.name.toLowerCase().includes(q)).slice(0, 8);
+
+  if (matches.length === 0) {
+    searchSuggestions.innerHTML = `<div class="suggestion-empty">Không tìm thấy dòng máy phù hợp</div>`;
+    searchSuggestions.classList.add("is-open");
+    return;
+  }
+
+  searchSuggestions.innerHTML = matches
+    .map(
+      (dv) => `
+      <button class="suggestion-item" data-id="${dv.id}">
+        <span class="suggestion-thumb">${initialsOf(dv.name)}</span>
+        <span class="suggestion-text">
+          <span class="suggestion-name">${highlight(dv.name, q)}</span>
+          <span class="suggestion-sub">${dv.brand} · ${osDisplayName(dv.os)} · ${dv.year}</span>
+        </span>
+      </button>`
+    )
+    .join("");
+  searchSuggestions.classList.add("is-open");
+
+  searchSuggestions.querySelectorAll(".suggestion-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const device = DEVICES.find((dv) => dv.id === el.dataset.id);
+      searchSuggestions.classList.remove("is-open");
+      searchInput.value = "";
+      pickDevice(device);
+    });
+    const device = DEVICES.find((dv) => dv.id === el.dataset.id);
+    const thumb = el.querySelector(".suggestion-thumb");
+    fetchDeviceImage(device).then((src) => { if (src) applyPhoto(thumb, src); });
+  });
+}
+
 let debounceTimer = null;
 searchInput.addEventListener("input", (e) => {
   clearTimeout(debounceTimer);
@@ -853,8 +885,14 @@ searchInput.addEventListener("input", (e) => {
     const all = devicesForPlatform(platform);
     const filtered = q ? all.filter((dv) => dv.name.toLowerCase().includes(q)) : all;
     renderDeviceGrid(filtered);
+    renderSearchSuggestions(v);
   }, 120);
 });
+
+searchInput.addEventListener("focus", () => {
+  if (searchInput.value.trim().length > 0) renderSearchSuggestions(searchInput.value);
+});
+
 
 const STAT_ROWS = [
   { key: "lookAround", label: "Nhìn xung quanh" },
@@ -952,28 +990,16 @@ PLATFORM_LIST = buildPlatformList();
 renderAdmin();
 renderOsGrid();
 
-// Sau khi hiện lưới hãng/hệ điều hành mặc định, âm thầm quét MobileAPI.dev để tìm thêm
-// những hãng mà data.js chưa có ô riêng. Nếu có, tự thêm ô mới vào lưới.
-setStatusEl(brandDiscoveryStatus, "is-loading", "Đang quét thêm hãng máy từ dữ liệu online...");
-discoverAllBrandsFromMobileApi().then(({ brands, ok, error }) => {
+// Xây lưới hãng từ BRAND_DOMAIN — thêm ô cho mọi hãng chưa có trong data.js.
+// Khi bấm vào ô hãng, MobileAPI.dev sẽ tải dòng máy của hãng đó qua /devices/search/.
+discoverAllBrandsFromMobileApi().then(({ brands }) => {
   const rebuilt = buildPlatformList(brands);
   const addedBrandCount = rebuilt.length - PLATFORM_LIST.length;
   PLATFORM_LIST = rebuilt;
-
-  if (!ok) {
-    const reason = error ? ` (${String(error).slice(0, 80)})` : "";
-    setStatusEl(
-      brandDiscoveryStatus,
-      "is-error",
-      addedBrandCount > 0
-        ? `Quét chưa xong nhưng vẫn tìm thêm được ${addedBrandCount} hãng.${reason}`
-        : `Không quét được thêm hãng mới, đang dùng danh sách có sẵn.${reason}`
-    );
-  } else if (addedBrandCount > 0) {
-    setStatusEl(brandDiscoveryStatus, "is-done", `Đã tìm thêm ${addedBrandCount} hãng máy mới.`);
+  if (addedBrandCount > 0) {
+    setStatusEl(brandDiscoveryStatus, "is-done", `Đã thêm ${addedBrandCount} hãng vào danh sách.`);
   } else {
-    setStatusEl(brandDiscoveryStatus, "is-done", "Danh sách hãng đã đầy đủ, không có hãng mới.");
+    brandDiscoveryStatus.classList.add("hidden");
   }
-
   renderOsGrid();
 });
