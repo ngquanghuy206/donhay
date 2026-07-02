@@ -34,6 +34,15 @@ function computeSensitivity(device) {
 const state = { os: null, device: null };
 
 // Domain chính thức của từng hãng để lấy logo thật (favicon chất lượng cao)
+// Một số hãng có tên hiển thị khác tên tìm kiếm trên API
+// (vd Sony Ericsson đã đổi brand thành "Sony" từ 2012)
+const BRAND_SEARCH_ALIAS = {
+  "Sony Ericsson": "Sony Ericsson",  // Wikidata có, MobileAPI dùng tên này
+  "Redmi": "Redmi",
+  "POCO": "Poco",
+  "itel": "itel",
+};
+
 const BRAND_DOMAIN = {
   Samsung: "samsung.com",
   Xiaomi: "mi.com",
@@ -322,6 +331,8 @@ async function augmentDevicesForPlatform(platform) {
   // không hiểu tên hệ điều hành, chỉ hiểu tên hãng sản xuất.
   const brandName = platform.baseOs === "android" ? platform.brand : platform.vendor;
   if (!brandName) return { addedCount: 0, ok: false };
+  // Alias tên tìm kiếm: một số hãng dùng tên khác trên Wikidata/MobileAPI
+  const searchName = BRAND_SEARCH_ALIAS[brandName] || brandName;
 
   const sameGroup = DEVICES.filter((dv) =>
     platform.baseOs === "android" ? dv.brand === brandName : dv.os === platform.baseOs
@@ -331,8 +342,8 @@ async function augmentDevicesForPlatform(platform) {
   let addedCount = 0;
 
   const [wd, mapi] = await Promise.all([
-    fetchWikidataModelsForBrand(brandName),
-    fetchMobileApiModelsForBrand(brandName)
+    fetchWikidataModelsForBrand(searchName),
+    fetchMobileApiModelsForBrand(searchName)
   ]);
   const wdResults = wd.items;
   const mapiResults = mapi.items;
@@ -488,24 +499,16 @@ function setStatusEl(el, mode, text) {
 }
 
 function refreshFromWikidata(platform) {
-  setSyncStatus("is-loading", `Đang tải thêm dữ liệu máy ${platform.name}...`);
+  // Ẩn status bar — không hiện "đang tải" hay thông báo nào
+  syncStatus.classList.add("hidden");
 
-  augmentDevicesForPlatform(platform).then(({ addedCount, ok, error }) => {
+  augmentDevicesForPlatform(platform).then(({ addedCount }) => {
     if (state.os !== platform.id) return;
-
-    if (!ok) {
-      const reason = error ? ` (${String(error).slice(0, 80)})` : "";
-      setSyncStatus("is-error", `Không kết nối được nguồn dữ liệu bổ sung, đang dùng danh sách có sẵn.${reason}`);
-      return;
-    }
     if (addedCount > 0) {
-      setSyncStatus("is-done", `Đã bổ sung thêm ${addedCount} máy từ dữ liệu online.`);
       const q = searchInput.value.trim().toLowerCase();
       const all = devicesForPlatform(platform);
       const filtered = q ? all.filter((dv) => dv.name.toLowerCase().includes(q)) : all;
       renderDeviceGrid(filtered);
-    } else {
-      setSyncStatus("is-done", "Danh sách máy đã đầy đủ, không có thêm dữ liệu mới.");
     }
   });
 }
@@ -994,12 +997,7 @@ renderOsGrid();
 // Khi bấm vào ô hãng, MobileAPI.dev sẽ tải dòng máy của hãng đó qua /devices/search/.
 discoverAllBrandsFromMobileApi().then(({ brands }) => {
   const rebuilt = buildPlatformList(brands);
-  const addedBrandCount = rebuilt.length - PLATFORM_LIST.length;
   PLATFORM_LIST = rebuilt;
-  if (addedBrandCount > 0) {
-    setStatusEl(brandDiscoveryStatus, "is-done", `Đã thêm ${addedBrandCount} hãng vào danh sách.`);
-  } else {
-    brandDiscoveryStatus.classList.add("hidden");
-  }
+  brandDiscoveryStatus.classList.add("hidden");
   renderOsGrid();
 });
