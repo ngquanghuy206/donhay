@@ -428,12 +428,14 @@ const searchSuggestions = document.getElementById("searchSuggestions");
 
 function renderAdmin() {
   document.getElementById("adminName").textContent = ADMIN_INFO.name;
-  document.getElementById("adminInitials").textContent = ADMIN_INFO.name
-    .split(" ")
-    .slice(-2)
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase();
+
+  // Dùng ảnh thật thay vì initials
+  const avatarEl = document.getElementById("adminInitials");
+  avatarEl.style.backgroundImage = "url('https://i.imgur.com/fKOur8O.jpeg')";
+  avatarEl.style.backgroundSize = "cover";
+  avatarEl.style.backgroundPosition = "center";
+  avatarEl.textContent = "";
+
   const links = document.getElementById("adminLinks");
   const items = [
     { label: "Telegram", value: "@" + ADMIN_INFO.tele, href: "https://t.me/" + ADMIN_INFO.tele },
@@ -450,6 +452,22 @@ function renderAdmin() {
         </a>`
     )
     .join("");
+
+  // Đồng hồ thời gian thực
+  const clockEl = document.getElementById("adminClock");
+  function updateClock() {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const d = pad(now.getDate());
+    const m = pad(now.getMonth() + 1);
+    const y = now.getFullYear();
+    const h = pad(now.getHours());
+    const min = pad(now.getMinutes());
+    const s = pad(now.getSeconds());
+    clockEl.textContent = "Ngày " + d + "/" + m + "/" + y + " · " + h + ":" + min + ":" + s;
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
 }
 
 function renderOsGrid() {
