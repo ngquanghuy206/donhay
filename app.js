@@ -156,6 +156,16 @@ const BACK4APP_CONFIG = {
   className: "Dataset_Cell_Phones_Model_Brand"
 };
 
+// MobileAPI.dev — nguồn thứ 3, có ảnh thật kèm sẵn (base64) trong response, gói free
+// 1.000 request/tháng. Endpoint /devices/search/ đã xác nhận qua tài liệu thật (không đoán mò
+// như Back4App lúc trước), nhưng KHÔNG có endpoint "liệt kê toàn bộ máy 1 hãng mà không cần
+// từ khoá" chắc chắn, nên ta tận dụng chính /devices/search/ với name=tên hãng (tìm mờ/fuzzy)
+// rồi phân trang tới khi hết, đó là cách "quét toàn bộ" khả thi nhất với 1 endpoint xác nhận được.
+const MOBILEAPI_CONFIG = {
+  baseUrl: "https://api.mobileapi.dev",
+  apiKey: "f483213689edc132ad7e06dc306b310e2ed4b7ea"
+};
+
 function normalizeName(n) {
   return n.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -207,8 +217,16 @@ async function fetchBrandPageWithRetry(page, pageSize, attempt = 0) {
   }
 
   if (!res.ok || json.error) {
-    // Parse Server trả lỗi có cấu trúc, vd { code, error: "..." } — thường do vượt giới hạn
-    // request/giây của gói free hoặc app tạm ngưng. Thử lại vài lần trước khi báo lỗi thật.
+    if ((res.status === 401 || res.status === 403) && attempt === 0) {
+      // Lỗi quyền truy cập (CLP chưa bật Public Read, hoặc sai appId/restKey) — thử lại không
+      // ích gì vì bản chất là bị chặn quyền, không phải lỗi tạm thời. Báo ngay để không mất thời gian.
+      throw new Error(
+        `HTTP ${res.status}: ${json.error || "unauthorized"} — kiểm tra Class Level Permissions ` +
+          `(Public Read) của bảng ${BACK4APP_CONFIG.className} trên Back4App Dashboard, hoặc kiểm tra lại appId/restKey.`
+      );
+    }
+    // Các lỗi khác (vd vượt giới hạn request/giây của gói free, lỗi tạm thời phía server)
+    // thì thử lại vài lần trước khi báo lỗi thật.
     if (attempt < 2) {
       await sleep(500 * (attempt + 1));
       return fetchBrandPageWithRetry(page, pageSize, attempt + 1);
@@ -328,7 +346,9 @@ function fetchBack4AppModelsForBrand(brandName) {
         .filter(Boolean);
       return { items, ok: true };
     } catch (err) {
-      return { items: [], ok: false, error: String((err && err.message) || err) };
+      const message = String((err && err.message) || err);
+      console.error(`[fetchBack4AppModelsForBrand] "${brandName}" failed:`, message, err);
+      return { items: [], ok: false, error: message };
     }
   })();
 
@@ -342,16 +362,21 @@ function fetchWikidataModelsForBrand(brandName) {
 
   const promise = (async () => {
     const safeBrand = brandName.replace(/["\\]/g, "");
+    // Mở rộng so với trước: (1) dùng lớp "phone model" rộng hơn (bắt cả điện thoại phổ thông,
+    // không chỉ smartphone), (2) khớp CẢ 2 thuộc tính manufacturer (P176) VÀ brand (P1716) vì
+    // nhiều model chỉ khai 1 trong 2, (3) so khớp kiểu "chứa" thay vì phải khớp tuyệt đối 100%
+    // (bắt được "Samsung Electronics", "Sony Mobile"...), (4) nâng giới hạn kết quả 80 -> 400.
     const sparql = `
       SELECT DISTINCT ?item ?itemLabel ?image ?pubdate WHERE {
-        ?item wdt:P31 wd:Q19723451 .
-        ?item wdt:P176 ?manufacturer .
-        ?manufacturer rdfs:label ?mlabel .
-        FILTER(LANG(?mlabel) = "en" && LCASE(STR(?mlabel)) = LCASE("${safeBrand}"))
+        ?item wdt:P31 wd:Q22811462 .
+        { ?item wdt:P176 ?brandEntity . } UNION { ?item wdt:P1716 ?brandEntity . }
+        ?brandEntity rdfs:label ?blabel .
+        FILTER(LANG(?blabel) = "en")
+        FILTER(CONTAINS(LCASE(STR(?blabel)), LCASE("${safeBrand}")))
         OPTIONAL { ?item wdt:P18 ?image. }
         OPTIONAL { ?item wdt:P577 ?pubdate. }
         SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-      } LIMIT 80`;
+      } LIMIT 400`;
     const url = "https://query.wikidata.org/sparql?format=json&query=" + encodeURIComponent(sparql);
     try {
       const res = await fetch(url, { headers: { Accept: "application/sparql-results+json" } });
@@ -383,6 +408,83 @@ function fetchWikidataModelsForBrand(brandName) {
   return promise;
 }
 
+// Rút gọn 1 record thiết bị trả về từ MobileAPI.dev thành dạng dùng chung trong app.
+// Field name chưa 100% chắc chắn (docs không show đủ), nên thử nhiều khả năng phổ biến.
+function normalizeMobileApiDevice(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const name = raw.name || raw.device_name || raw.model || null;
+  if (!name) return null;
+  const releaseStr = raw.release_date || raw.launch_date || "";
+  const yearMatch = String(releaseStr).match(/(19|20)\d{2}/);
+  const year = yearMatch ? parseInt(yearMatch[0], 10) : raw.year || null;
+  const imgB64 = raw.main_image_b64 || raw.thumbnail_b64 || raw.image_b64 || null;
+  const imgUrl = raw.main_image_url || raw.thumbnail_url || raw.image_url || raw.image || null;
+  return {
+    name,
+    year,
+    image: imgB64 ? `data:image/jpeg;base64,${imgB64}` : imgUrl || null
+  };
+}
+
+// Cố gắng đọc mảng thiết bị ra khỏi response, dù không chắc chắn 100% tên field bọc ngoài
+// (results / devices / data / hoặc mảng thẳng) vì tài liệu công khai không show đủ chi tiết này.
+function extractMobileApiList(json) {
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.results)) return json.results;
+  if (Array.isArray(json.devices)) return json.devices;
+  if (Array.isArray(json.data)) return json.data;
+  return [];
+}
+
+const mobileApiBrandCache = new Map();
+function fetchMobileApiModelsForBrand(brandName) {
+  if (mobileApiBrandCache.has(brandName)) return mobileApiBrandCache.get(brandName);
+
+  const promise = (async () => {
+    const items = [];
+    const seen = new Set();
+    const maxPages = 30; // an toàn (30 trang x 50 máy = tối đa 1500 máy/hãng)
+    try {
+      for (let page = 1; page <= maxPages; page++) {
+        const url =
+          `${MOBILEAPI_CONFIG.baseUrl}/devices/search/?name=${encodeURIComponent(brandName)}` +
+          `&manufacturer=${encodeURIComponent(brandName)}&page=${page}&key=${MOBILEAPI_CONFIG.apiKey}`;
+        const res = await fetch(url);
+
+        if (res.status === 429) {
+          // Hết quota 1.000 request/tháng — dừng ngay, không thử lại (thử lại cũng vô ích).
+          throw new Error("HTTP 429: đã dùng hết quota MobileAPI.dev tháng này");
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const json = await res.json();
+        const rows = extractMobileApiList(json);
+        if (rows.length === 0) break;
+
+        rows.forEach((r) => {
+          const item = normalizeMobileApiDevice(r);
+          if (!item) return;
+          const key = item.name.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          items.push(item);
+        });
+
+        if (rows.length < 50) break; // trang cuối (ít hơn 1 trang đầy)
+        await new Promise((r) => setTimeout(r, 120)); // giãn nhịp nhẹ giữa các trang
+      }
+      return { items, ok: true };
+    } catch (err) {
+      const message = String((err && err.message) || err);
+      console.error(`[fetchMobileApiModelsForBrand] "${brandName}" failed:`, message, err);
+      return { items, ok: items.length > 0, error: message };
+    }
+  })();
+
+  mobileApiBrandCache.set(brandName, promise);
+  return promise;
+}
+
 // Bổ sung DEVICES từ cả 2 nguồn, so khớp tên đã chuẩn hoá để tránh trùng lặp.
 // Trả về { addedCount, ok } — ok=false nếu CẢ 2 nguồn đều lỗi (mất mạng, API die, ...),
 // để UI phân biệt được "gọi API xong nhưng không có máy mới" với "gọi API bị lỗi".
@@ -400,13 +502,16 @@ async function augmentDevicesForPlatform(platform) {
   const targetOs = platform.baseOs === "android" ? "android" : platform.baseOs;
   let addedCount = 0;
 
-  const [b4a, wd] = await Promise.all([
+  const [b4a, wd, mapi] = await Promise.all([
     fetchBack4AppModelsForBrand(brandName),
-    fetchWikidataModelsForBrand(brandName)
+    fetchWikidataModelsForBrand(brandName),
+    fetchMobileApiModelsForBrand(brandName)
   ]);
   const b4aResults = b4a.items;
   const wdResults = wd.items;
-  const ok = b4a.ok || wd.ok;
+  const mapiResults = mapi.items;
+  const ok = b4a.ok || wd.ok || mapi.ok;
+  const errorReason = !ok ? b4a.error || wd.error || mapi.error : null;
 
   b4aResults.forEach((r) => {
     if (!r.year || r.year < 2010) return;
@@ -462,7 +567,34 @@ async function augmentDevicesForPlatform(platform) {
     addedCount++;
   });
 
-  return { addedCount, ok };
+  mapiResults.forEach((r) => {
+    if (!r.year || r.year < 2010) return;
+    const norm = normalizeName(r.name);
+    const isDup = existingNorm.some((ex) => ex === norm || ex.includes(norm) || norm.includes(ex));
+    if (isDup) return;
+    const id = "mapi-" + norm;
+    if (DEVICES.some((dv) => dv.id === id)) return;
+
+    const specs = estimateSpecsForYear(r.year);
+    DEVICES.push({
+      id,
+      name: r.name,
+      brand: brandName,
+      os: targetOs,
+      screen: specs.screen,
+      ppi: specs.ppi,
+      refresh: specs.refresh,
+      ram: specs.ram,
+      tier: specs.tier,
+      year: r.year,
+      estimated: true
+    });
+    if (r.image) imageCache.set(id, Promise.resolve(r.image));
+    existingNorm.push(norm);
+    addedCount++;
+  });
+
+  return { addedCount, ok, error: errorReason };
 }
 
 const osGrid = document.getElementById("osGrid");
@@ -557,11 +689,12 @@ function setStatusEl(el, mode, text) {
 function refreshFromWikidata(platform) {
   setSyncStatus("is-loading", `Đang tải thêm dữ liệu máy ${platform.name}...`);
 
-  augmentDevicesForPlatform(platform).then(({ addedCount, ok }) => {
+  augmentDevicesForPlatform(platform).then(({ addedCount, ok, error }) => {
     if (state.os !== platform.id) return;
 
     if (!ok) {
-      setSyncStatus("is-error", "Không kết nối được nguồn dữ liệu bổ sung, đang dùng danh sách có sẵn.");
+      const reason = error ? ` (${String(error).slice(0, 80)})` : "";
+      setSyncStatus("is-error", `Không kết nối được nguồn dữ liệu bổ sung, đang dùng danh sách có sẵn.${reason}`);
       return;
     }
     if (addedCount > 0) {
