@@ -479,28 +479,41 @@ async function selectOs(platformId) {
   resultSection.classList.add("hidden");
   searchInput.value = "";
   searchSuggestions.classList.remove("is-open");
+  syncStatus.classList.add("hidden");
   searchInput.placeholder = `Tìm dòng máy ${platform.name}, ví dụ: ${sampleDeviceFor(platform)}`;
   searchInput.focus();
 
-  // Nếu đã cache rồi → render ngay, không cần chờ
-  const alreadyCached = wikidataBrandCache.has(platform.baseOs === "android" ? platform.brand : platform.vendor)
-    || mobileApiBrandCache.has(platform.baseOs === "android" ? platform.brand : platform.vendor);
-
-  if (alreadyCached) {
-    renderDeviceGrid(devicesForPlatform(platform));
-    refreshFromWikidata(platform);
-    return;
+  // Luôn hiện máy có sẵn trong data.js ngay lập tức
+  const existing = devicesForPlatform(platform);
+  if (existing.length > 0) {
+    renderDeviceGrid(existing);
+  } else {
+    // Hãng không có máy nào trong data.js → hiện spinner rồi chờ API
+    deviceGrid.innerHTML = `<div class="grid-spinner"></div>`;
   }
 
-  // Lần đầu bấm vào hãng: hiện skeleton rồi fetch API, sau đó render toàn bộ
-  deviceGrid.innerHTML = `<div class="grid-spinner"></div>`;
-  syncStatus.classList.add("hidden");
-  await augmentDevicesForPlatform(platform);
-  if (state.os !== platformId) return; // user đã đổi hãng khác rồi
-  const q = searchInput.value.trim().toLowerCase();
-  const all = devicesForPlatform(platform);
-  const filtered = q ? all.filter(dv => dv.name.toLowerCase().includes(q)) : all;
-  renderDeviceGrid(filtered);
+  // Fetch API ngầm (có cache → nhanh, không cache → chờ)
+  const brandKey = platform.baseOs === "android" ? platform.brand : platform.vendor;
+  const alreadyCached = wikidataBrandCache.has(brandKey) || mobileApiBrandCache.has(brandKey);
+
+  if (alreadyCached) {
+    // Đã cache → augment tức thì, cập nhật grid nếu có thêm máy
+    augmentDevicesForPlatform(platform).then(({ addedCount }) => {
+      if (state.os !== platformId) return;
+      if (addedCount > 0) {
+        const q = searchInput.value.trim().toLowerCase();
+        const all = devicesForPlatform(platform);
+        renderDeviceGrid(q ? all.filter(dv => dv.name.toLowerCase().includes(q)) : all);
+      }
+    });
+  } else {
+    // Lần đầu: await để lấy máy mới từ API rồi render lại
+    await augmentDevicesForPlatform(platform);
+    if (state.os !== platformId) return;
+    const q = searchInput.value.trim().toLowerCase();
+    const all = devicesForPlatform(platform);
+    renderDeviceGrid(q ? all.filter(dv => dv.name.toLowerCase().includes(q)) : all);
+  }
 }
 
 // Sau khi hiện danh sách máy có sẵn, gọi MobileAPI.dev + Wikidata để bổ sung thêm các model
